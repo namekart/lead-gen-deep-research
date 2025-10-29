@@ -84,7 +84,9 @@ async def tavily_search(
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
     summarization_model = init_chat_model(
-        model=configurable.summarization_model,
+        model=normalize_model_name(configurable.summarization_model),
+        model_provider=get_model_provider_for_model(configurable.summarization_model),
+        base_url=get_base_url_for_model(configurable.summarization_model),
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
         tags=["langsmith:nostream"]
@@ -889,15 +891,59 @@ def get_config_value(value):
     else:
         return value.value
 
+def get_model_provider_for_model(model_name: str | None) -> str | None:
+    """Infer LangChain model_provider from a model string.
+
+    For OpenRouter models, we route through the OpenAI provider since OpenRouter
+    exposes an OpenAI-compatible API.
+    """
+    if not model_name:
+        return None
+    model_lower = model_name.lower()
+    if model_lower.startswith("openrouter:"):
+        return "openai"  # OpenRouter uses OpenAI-compatible API
+    if model_lower.startswith("openai:"):
+        return "openai"
+    if model_lower.startswith("anthropic:"):
+        return "anthropic"
+    if model_lower.startswith("google") or model_lower.startswith("google_genai:"):
+        return "google_genai"
+    return None
+
+def get_base_url_for_model(model_name: str | None) -> str | None:
+    """Return custom base_url for OpenRouter models."""
+    if not model_name:
+        return None
+    if model_name.lower().startswith("openrouter:"):
+        return "https://openrouter.ai/api/v1"
+    return None
+
+def normalize_model_name(model_name: str | None) -> str | None:
+    """Normalize model identifier for the target provider.
+
+    For OpenRouter, strip the 'openrouter:' prefix and keep just the route
+    (e.g., 'openrouter:openai/gpt-4o-mini' -> 'openai/gpt-4o-mini').
+    """
+    if not model_name:
+        return None
+    if model_name.lower().startswith("openrouter:"):
+        return model_name.split(":", 1)[1]
+    return model_name
+
 def get_api_key_for_model(model_name: str, config: RunnableConfig):
-    """Get API key for a specific model from environment or config."""
+    """Get API key for a specific model from environment or config.
+
+    For OpenRouter models, returns OPENROUTER_API_KEY.
+    """
     should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
     model_name = model_name.lower()
     if should_get_from_config.lower() == "true":
         api_keys = config.get("configurable", {}).get("apiKeys", {})
         if not api_keys:
             return None
-        if model_name.startswith("openai:"):
+        if model_name.startswith("openrouter:"):
+            return api_keys.get("OPENROUTER_API_KEY")
+        elif model_name.startswith("openai:"):
             return api_keys.get("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return api_keys.get("ANTHROPIC_API_KEY")
@@ -905,7 +951,9 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return api_keys.get("GOOGLE_API_KEY")
         return None
     else:
-        if model_name.startswith("openai:"):
+        if model_name.startswith("openrouter:"):
+            return os.getenv("OPENROUTER_API_KEY")
+        elif model_name.startswith("openai:"):
             return os.getenv("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")

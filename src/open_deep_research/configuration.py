@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class SearchAPI(Enum):
     """Enumeration of available search API providers."""
-    
+
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
@@ -18,7 +18,7 @@ class SearchAPI(Enum):
 
 class MCPConfig(BaseModel):
     """Configuration for Model Context Protocol (MCP) servers."""
-    
+
     url: Optional[str] = Field(
         default=None,
         optional=True,
@@ -37,7 +37,7 @@ class MCPConfig(BaseModel):
 
 class Configuration(BaseModel):
     """Main configuration class for the Deep Research agent."""
-    
+
     # General Configuration
     max_structured_output_retries: int = Field(
         default=3,
@@ -248,5 +248,5 @@ class Configuration(BaseModel):
 
     class Config:
         """Pydantic configuration."""
-        
+
         arbitrary_types_allowed = True

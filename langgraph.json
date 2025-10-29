@@ -1,7 +1,8 @@
 {
     "dockerfile_lines": [],
     "graphs": {
-      "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher"
+      "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher",
+      "Lead Gen": "./src/lead_gen/agent.py:leadgen_researcher"
     },
     "python_version": "3.11",
     "env": "./.env",
