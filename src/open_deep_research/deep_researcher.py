@@ -1,7 +1,8 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
-from typing import Literal
+from typing import Any, Optional, TypedDict, Union, Literal, Annotated, Callable, TypeVar, Sequence, List, Dict
+from typing_extensions import override
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
@@ -327,14 +328,24 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                     tool_call_id=overflow_call["id"]
                 ))
 
-            # Aggregate raw notes from all research results
-            raw_notes_concat = "\n".join([
-                "\n".join(observation.get("raw_notes", []))
-                for observation in tool_results
-            ])
-
+            # Aggregate raw notes and leads from all research results
+            raw_notes_concat = []
+            all_leads = []
+            
+            for observation in tool_results:
+                # Collect raw notes
+                if "raw_notes" in observation:
+                    raw_notes_concat.extend(observation["raw_notes"])
+                # Collect leads if present
+                if "leads" in observation and isinstance(observation["leads"], list):
+                    all_leads.extend(observation["leads"])
+            
             if raw_notes_concat:
-                update_payload["raw_notes"] = [raw_notes_concat]
+                update_payload["raw_notes"] = ["\n".join(raw_notes_concat)]
+            
+            if all_leads:
+                # Use a type: ignore comment since we know the structure of the state
+                update_payload["leads"] = all_leads  # type: ignore
 
         except Exception as e:
             # Handle research execution errors
@@ -517,6 +528,63 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
         update={"researcher_messages": tool_outputs}
     )
 
+async def extract_leads_from_research(compressed_research: str, raw_notes: List[str], config: RunnableConfig) -> List[Dict]:
+    """Extract leads from compressed research and raw notes.
+    
+    Args:
+        compressed_research: The compressed research text
+        raw_notes: List of raw research notes
+        config: Runtime configuration with model settings
+        
+    Returns:
+        List of extracted leads as dictionaries
+    """
+    try:
+        cfg = Configuration.from_runnable_config(config)
+        
+        # Prepare the extraction model
+        extraction_model = (
+            configurable_model
+            .with_structured_output(LeadList)
+            .with_retry(stop_after_attempt=cfg.max_structured_output_retries)
+            .with_config({
+                "model": normalize_model_name(cfg.research_model),
+                "model_provider": get_model_provider_for_model(cfg.research_model),
+                "base_url": get_base_url_for_model(cfg.research_model),
+                "max_tokens": cfg.research_model_max_tokens,
+                "api_key": get_api_key_for_model(cfg.research_model, config),
+                "tags": ["langsmith:nostream"],
+            })
+        )
+        
+        # Prepare the prompt for lead extraction
+        prompt = (
+            "Extract potential leads from the following research findings. "
+            "Focus on companies, organizations, or individuals who might be interested in the domain.\n\n"
+            f"RESEARCH SUMMARY:\n{compressed_research}\n\n"
+            f"RAW NOTES:\n{''.join(raw_notes)}\n\n"
+            "For each lead, provide:\n"
+            "- website: The company's website URL\n"
+            "- detailed_summary: Why they'd be interested in the domain\n"
+            "- rationale: Your reasoning for this lead\n"
+            "- tier: Optional classification tier (e.g., 'Tier 1', 'Strategic')\n"
+            "- meta_data: Any additional relevant information\n\n"
+            "Only include real, verifiable leads with valid websites."
+        )
+        
+        # Get the structured output
+        result = await extraction_model.ainvoke([HumanMessage(content=prompt)])
+        
+        # Convert Lead objects to dictionaries for JSON serialization
+        if result and hasattr(result, "leads"):
+            return [lead.dict() for lead in result.leads]
+        return []
+        
+    except Exception as e:
+        logger.error(f"Error extracting leads: {str(e)}")
+        return []
+
+
 async def compress_research(state: ResearcherState, config: RunnableConfig):
     """Compress and synthesize research findings into a concise, structured summary.
 
@@ -529,7 +597,7 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         config: Runtime configuration with compression model settings
 
     Returns:
-        Dictionary containing compressed research summary and raw notes
+        Dictionary containing compressed research summary, raw notes, and extracted leads
     """
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
@@ -567,10 +635,18 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
                 for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
             ])
 
-            # Return successful compression result
+            # Extract leads from the compressed research
+            leads = await extract_leads_from_research(
+                str(response.content), 
+                [raw_notes_content],
+                config
+            )
+            
+            # Return successful compression result with extracted leads
             return {
                 "compressed_research": str(response.content),
-                "raw_notes": [raw_notes_content]
+                "raw_notes": [raw_notes_content],
+                "leads": leads
             }
 
         except Exception as e:
@@ -592,7 +668,8 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
 
     return {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",
-        "raw_notes": [raw_notes_content]
+        "raw_notes": [raw_notes_content],
+        "leads": []
     }
 
 # Researcher Subgraph Construction

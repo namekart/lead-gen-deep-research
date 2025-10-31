@@ -33,6 +33,11 @@ from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
 
+from langchain_core.tools import tool
+from lead_gen.configuration import LeadGenConfiguration
+from lead_gen.clients.scraping_client import ScraperClient
+
+
 ##########################
 # Tavily Search Tool Utils
 ##########################
@@ -586,6 +591,9 @@ async def get_all_tools(config: RunnableConfig):
     search_tools = await get_search_tool(search_api)
     tools.extend(search_tools)
 
+    # Add scraping tool
+    tools.append(scraping_company_info)
+
     # Track existing tool names to prevent conflicts
     existing_tool_names = {
         tool.name if hasattr(tool, "name") else tool.get("name", "web_search")
@@ -971,3 +979,24 @@ def get_tavily_api_key(config: RunnableConfig):
         return api_keys.get("TAVILY_API_KEY")
     else:
         return os.getenv("TAVILY_API_KEY")
+
+SCRAPING_TOOL_DESCRIPTION = (
+    "Fetches detailed company information for a given domain using internal scraping and enrichment services. "
+    "Input: a company domain string (e.g., 'swiggy.com'). "
+    "Output: JSON with company details (name, description, revenue, employee size, socials, etc), or None if not found."
+)
+
+@tool(description=SCRAPING_TOOL_DESCRIPTION)
+async def scraping_company_info(
+    company_domain: str,
+    config: RunnableConfig = None
+) -> dict | None:
+    """Fetch company info via the scraping client for the given domain."""
+    cfg = LeadGenConfiguration()
+    client = ScraperClient(cfg)
+    return await client.get_company_info(company_domain)
+
+scraping_company_info.metadata = {
+    "type": "company_info",
+    "name": "scraping_company_info"
+}

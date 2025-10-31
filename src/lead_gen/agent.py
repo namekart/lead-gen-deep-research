@@ -49,6 +49,7 @@ class Lead(BaseModel):
     website: str = Field(..., description="Canonical website or domain of the lead")
     detailed_summary: str = Field(..., description="Detailed, actionable summary of why this is a fit")
     rationale: str = Field(..., description="Short justification tying back to classification/buyer tiers")
+    tier: Optional[str] = Field(None, description="Buyer or classification tier for this lead")
     meta_data: Optional[Dict[str, str]] = Field(
         default=None, description="Optional metadata such as contact hints, geo, size"
     )
@@ -105,53 +106,18 @@ async def classify_and_seed_supervisor(state: LeadGenState, config: RunnableConf
     }
 
 
-async def generate_leads(state: LeadGenState, config: RunnableConfig):
-    """Extract real companies/leads from web search results and structure them."""
-    cfg = Configuration.from_runnable_config(config)
-    notes_text = "\n".join(state.get("notes", []))
-    domain_name = state.get("domain_name", "")
-
-    extraction_model = (
-        configurable_model
-        .with_structured_output(LeadList)
-        .with_retry(stop_after_attempt=cfg.max_structured_output_retries)
-        .with_config({
-            "model": normalize_model_name(cfg.research_model),
-            "model_provider": get_model_provider_for_model(cfg.research_model),
-            "base_url": get_base_url_for_model(cfg.research_model),
-            "max_tokens": cfg.research_model_max_tokens,
-            "api_key": get_api_key_for_model(cfg.research_model, config),
-            "tags": ["langsmith:nostream"],
-        })
-    )
-
-    prompt = (
-        "You are extracting real companies/organizations from web search results for domain brokerage.\n"
-        f"Domain: {domain_name}\n\n"
-        "WEB SEARCH RESULTS (raw data from researchers):\n" + notes_text + "\n\n"
-        "Instructions:\n"
-        "- Extract ONLY real companies/organizations mentioned in the search results above\n"
-        "- Do NOT generate or invent new companies\n"
-        "- For each real company found, provide:\n"
-        "  * website: Their actual website URL (if mentioned in search results)\n"
-        "  * detailed_summary: What the search results say about this company\n"
-        "  * rationale: Why this company would be interested in the domain based on search results\n"
-        "  * meta_data: Any additional info from search results (location, size, industry, etc.)\n"
-        "- Focus on companies that match the classification and buyer tiers\n"
-        "- If a company is mentioned multiple times, combine the information\n"
-        "- Extract as many real companies as possible from the search results\n"
-        "- If search results mention 'Dell, HP, Lenovo' - extract each as separate leads\n"
-        "- If search results mention 'Apple Inc. manufactures laptops' - extract Apple as a lead\n"
-        "- Only include companies that actually exist and are mentioned in the search results\n"
-    )
-
-    result = await extraction_model.ainvoke([HumanMessage(content=prompt)])
-
-    # Guard against invalid output
-    if not result or not getattr(result, "leads", None):
-        return {"leads": []}
-
-    return {"leads": result.leads}
+async def get_leads(state: LeadGenState, config: RunnableConfig):
+    """Return the current leads from the state.
+    
+    Args:
+        state: Current LeadGenState containing leads
+        config: Runtime configuration (unused, kept for compatibility)
+        
+    Returns:
+        Dictionary containing the current leads
+    """
+    # Simply return the leads from the current state
+    return {"leads": state.get("leads", [])}
 
 
 # Build the LeadGen graph (classify+seed → research → extract → final)
@@ -159,17 +125,15 @@ leadgen_builder = StateGraph(LeadGenState, input=LeadGenInputState, config_schem
 
 # Nodes
 leadgen_builder.add_node("classify_and_seed_supervisor", classify_and_seed_supervisor)
-leadgen_builder.add_node("research_supervisor", supervisor_subgraph)        # reuse existing
-leadgen_builder.add_node("generate_leads", generate_leads)                  # extract leads from research
+leadgen_builder.add_node("research_supervisor", supervisor_subgraph)  # reuse existing
+leadgen_builder.add_node("get_leads", get_leads)  # get leads from state
 # final_report_generation is intentionally disabled for LeadGen flow
 
 # Edges
 leadgen_builder.add_edge(START, "classify_and_seed_supervisor")
 leadgen_builder.add_edge("classify_and_seed_supervisor", "research_supervisor")
-leadgen_builder.add_edge("research_supervisor", "generate_leads")
-leadgen_builder.add_edge("generate_leads", END)
+leadgen_builder.add_edge("research_supervisor", "get_leads")  # supervisor can delegate to lead generation
+leadgen_builder.add_edge("get_leads", END)  # leads → end
 
 # Compiled graph
 leadgen_researcher = leadgen_builder.compile()
-
-

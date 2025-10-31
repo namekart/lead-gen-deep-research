@@ -94,3 +94,4 @@ class ResearcherOutputState(BaseModel):
     
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    leads: list[dict] = []
