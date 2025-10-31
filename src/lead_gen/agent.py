@@ -42,7 +42,7 @@ class LeadGenState(TypedDict, total=False):
     # Research artifacts
     notes: Annotated[list[str], override_reducer]
     # Final structured leads
-    leads: list["Lead"]
+    leads: Annotated[list["Lead"], override_reducer]
 
 
 class Lead(BaseModel):
@@ -108,11 +108,11 @@ async def classify_and_seed_supervisor(state: LeadGenState, config: RunnableConf
 
 async def get_leads(state: LeadGenState, config: RunnableConfig):
     """Return the current leads from the state.
-    
+
     Args:
         state: Current LeadGenState containing leads
         config: Runtime configuration (unused, kept for compatibility)
-        
+
     Returns:
         Dictionary containing the current leads
     """

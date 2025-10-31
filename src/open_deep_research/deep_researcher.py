@@ -3,6 +3,8 @@
 import asyncio
 from typing import Any, Optional, TypedDict, Union, Literal, Annotated, Callable, TypeVar, Sequence, List, Dict
 from typing_extensions import override
+import logging
+from pydantic import BaseModel, Field
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
@@ -265,7 +267,8 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             goto=END,
             update={
                 "notes": get_notes_from_tool_calls(supervisor_messages),
-                "research_brief": state.get("research_brief", "")
+                "research_brief": state.get("research_brief", ""),
+                "leads": state.get("leads", [])
             }
         )
 
@@ -331,7 +334,7 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             # Aggregate raw notes and leads from all research results
             raw_notes_concat = []
             all_leads = []
-            
+
             for observation in tool_results:
                 # Collect raw notes
                 if "raw_notes" in observation:
@@ -339,10 +342,10 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                 # Collect leads if present
                 if "leads" in observation and isinstance(observation["leads"], list):
                     all_leads.extend(observation["leads"])
-            
+
             if raw_notes_concat:
                 update_payload["raw_notes"] = ["\n".join(raw_notes_concat)]
-            
+
             if all_leads:
                 # Use a type: ignore comment since we know the structure of the state
                 update_payload["leads"] = all_leads  # type: ignore
@@ -530,18 +533,29 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
 
 async def extract_leads_from_research(compressed_research: str, raw_notes: List[str], config: RunnableConfig) -> List[Dict]:
     """Extract leads from compressed research and raw notes.
-    
+
     Args:
         compressed_research: The compressed research text
         raw_notes: List of raw research notes
         config: Runtime configuration with model settings
-        
+
     Returns:
         List of extracted leads as dictionaries
     """
     try:
         cfg = Configuration.from_runnable_config(config)
-        
+
+        # Define local schema to avoid circular imports
+        class Lead(BaseModel):
+            website: str
+            detailed_summary: str
+            rationale: str
+            tier: Optional[str] = None
+            meta_data: Optional[Dict[str, str]] = None
+
+        class LeadList(BaseModel):
+            leads: List[Lead]
+
         # Prepare the extraction model
         extraction_model = (
             configurable_model
@@ -556,7 +570,7 @@ async def extract_leads_from_research(compressed_research: str, raw_notes: List[
                 "tags": ["langsmith:nostream"],
             })
         )
-        
+
         # Prepare the prompt for lead extraction
         prompt = (
             "Extract potential leads from the following research findings. "
@@ -571,17 +585,17 @@ async def extract_leads_from_research(compressed_research: str, raw_notes: List[
             "- meta_data: Any additional relevant information\n\n"
             "Only include real, verifiable leads with valid websites."
         )
-        
+
         # Get the structured output
         result = await extraction_model.ainvoke([HumanMessage(content=prompt)])
-        
+
         # Convert Lead objects to dictionaries for JSON serialization
         if result and hasattr(result, "leads"):
             return [lead.dict() for lead in result.leads]
         return []
-        
+
     except Exception as e:
-        logger.error(f"Error extracting leads: {str(e)}")
+        logging.error("Error extracting leads: %s", e)
         return []
 
 
@@ -637,11 +651,11 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
 
             # Extract leads from the compressed research
             leads = await extract_leads_from_research(
-                str(response.content), 
+                str(response.content),
                 [raw_notes_content],
                 config
             )
-            
+
             # Return successful compression result with extracted leads
             return {
                 "compressed_research": str(response.content),
