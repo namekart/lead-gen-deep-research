@@ -168,7 +168,6 @@ async def fetch_dotdb_domains(state: DotDBState, config: Optional[RunnableConfig
         domains_by_kw = await client.get_active_domains(
             keywords=gen_keywords,
             site_status="active",
-            count_sorting=1
         )
         # Flatten and dedupe
         all_domains: List[str] = []
@@ -176,11 +175,22 @@ async def fetch_dotdb_domains(state: DotDBState, config: Optional[RunnableConfig
             for d in items:
                 if d not in all_domains:
                     all_domains.append(d)
+        # Exact SLD filter: keep only domains whose SLD exactly matches a generated keyword
+        allowed_slds = set((kw or "").strip().lower() for kw in gen_keywords if (kw or "").strip())
+        filtered_domains: List[str] = []
+        for d in all_domains:
+            try:
+                sld = extract_sld(d)
+            except Exception:
+                continue
+            if sld in allowed_slds:
+                filtered_domains.append(d)
+
         logger.info(
-            "[dotdb] fetch_dotdb_domains: total_domains=%d from %d keywords (bulk)",
-            len(all_domains), len(gen_keywords)
+            "[dotdb] fetch_dotdb_domains: total=%d, filtered_exact_sld=%d, keywords=%d",
+            len(all_domains), len(filtered_domains), len(gen_keywords)
         )
-        return {"dotdb_domains": all_domains}
+        return {"dotdb_domains": filtered_domains}
     except (RuntimeError, ValueError, aiohttp.ClientError):
         logger.exception("[dotdb] fetch_dotdb_domains: bulk call failed")
         return {"dotdb_domains": []}

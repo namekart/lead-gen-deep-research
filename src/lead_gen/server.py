@@ -46,8 +46,7 @@ async def get_dotdb_leads(req: DotDBRequest) -> Dict[str, List[str]]:
     try:
         domains = await client.get_active_domains(
             keywords=req.keywords,
-            site_status="active",
-            count_sorting=1
+            site_status="active"
         )
         return domains
     except Exception as e:
@@ -65,8 +64,7 @@ async def get_dotdb_leads_single(req: DotDBSingleRequest) -> List[str]:
     try:
         domains_dict = await client.get_active_domains(
             keywords=[req.keyword],
-            site_status="active",
-            count_sorting=1
+            site_status="active"
         )
         # Return the domains for the single keyword
         return domains_dict.get(req.keyword, [])

@@ -18,7 +18,6 @@ class DotDBClient:
         self,
         keywords: List[str],
         site_status: str = "active",
-        count_sorting: int = 1
     ) -> Dict[str, List[str]]:
         """
         Fetch leads for keywords and extract all active domains grouped by keyword.
@@ -35,7 +34,6 @@ class DotDBClient:
         url = f"{self.base_url}/dotdb/getleads/bulk"
         params = {
             "site_status": site_status,
-            "count_sorting": count_sorting
         }
         headers = {"Content-Type": "application/json"}
 
