@@ -1,6 +1,6 @@
 # src/lead_gen/agent.py
 
-from typing import Annotated, List, Optional, Dict
+from typing import Annotated, List, Optional, Dict, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, MessageLikeRepresentation
 from langchain_core.runnables import RunnableConfig
@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
 
 from lead_gen.classify_prompts import classification_and_buyers_prompt, CLASSIFICATION_GUIDE, leadgen_supervisor_prompt
+from lead_gen.dotdb_subgraph import dotdb_subgraph
 
 
 class LeadGenInputState(TypedDict):
@@ -50,7 +51,7 @@ class Lead(BaseModel):
     detailed_summary: str = Field(..., description="Detailed, actionable summary of why this is a fit")
     rationale: str = Field(..., description="Short justification tying back to classification/buyer tiers")
     tier: Optional[str] = Field(None, description="Buyer or classification tier for this lead")
-    meta_data: Optional[Dict[str, str]] = Field(
+    meta_data: Optional[Dict[str, Any]] = Field(
         default=None, description="Optional metadata such as contact hints, geo, size"
     )
 
@@ -106,34 +107,78 @@ async def classify_and_seed_supervisor(state: LeadGenState, config: RunnableConf
     }
 
 
-async def get_leads(state: LeadGenState, config: RunnableConfig):
-    """Return the current leads from the state.
+async def get_leads(state: LeadGenState, _config: Optional[RunnableConfig] = None):
+    """Return merged leads from both supervisor and dotdb workflows.
 
     Args:
-        state: Current LeadGenState containing leads
+        state: Current LeadGenState containing leads from both workflows
         config: Runtime configuration (unused, kept for compatibility)
 
     Returns:
-        Dictionary containing the current leads
+        Dictionary containing the merged leads
     """
-    # Simply return the leads from the current state
-    return {"leads": state.get("leads", [])}
+    # Get leads from state (merged by override_reducer from both workflows)
+    leads = state.get("leads", [])
+
+    # Convert dict leads to Lead objects if needed
+    # (assuming supervisor may return Lead objects and dotdb returns dicts)
+    processed_leads = []
+    for lead in leads:
+        if isinstance(lead, dict):
+            # Convert dict to Lead object
+            processed_leads.append(Lead(**lead))
+        elif isinstance(lead, Lead):
+            processed_leads.append(lead)
+        else:
+            # Keep as is if already in correct format
+            processed_leads.append(lead)
+
+    return {"leads": processed_leads}
 
 
-# Build the LeadGen graph (classify+seed → research → extract → final)
+async def dotdb_generate_leads(state: LeadGenState, config: RunnableConfig) -> Dict:
+    """Run DotDB (incl. Jina) and return Lead objects directly from subgraph output."""
+    domain_name = state.get("domain_name", "")
+    dotdb_result = await dotdb_subgraph.ainvoke({
+        "domain_name": domain_name,
+        "classification_output": state.get("classification_output") or "",
+    }, config)
+    leads_dicts = dotdb_result.get("leads", [])
+    # Convert to Lead models
+    parsed: list[Lead] = []
+    for item in leads_dicts:
+        parsed.append(
+            Lead(
+                website=item.get("website", ""),
+                detailed_summary=item.get("detailed_summary", ""),
+                rationale=item.get("rationale", ""),
+                tier=item.get("tier"),
+                meta_data=item.get("meta_data"),
+            )
+        )
+    return {"leads": parsed}
+
+
+# Build the LeadGen graph with parallel workflows
+# Flow: classify → (supervisor || dotdb) → merge → get_leads
 leadgen_builder = StateGraph(LeadGenState, input=LeadGenInputState, config_schema=Configuration)
 
 # Nodes
 leadgen_builder.add_node("classify_and_seed_supervisor", classify_and_seed_supervisor)
-leadgen_builder.add_node("research_supervisor", supervisor_subgraph)  # reuse existing
-leadgen_builder.add_node("get_leads", get_leads)  # get leads from state
+leadgen_builder.add_node("research_supervisor", supervisor_subgraph)  # supervisor workflow
+leadgen_builder.add_node("dotdb_generate_leads", dotdb_generate_leads)  # dotdb+jina→leads
+leadgen_builder.add_node("get_leads", get_leads)  # merge and return leads
 # final_report_generation is intentionally disabled for LeadGen flow
 
-# Edges
+# Edges - run dotdb and supervisor in parallel
 leadgen_builder.add_edge(START, "classify_and_seed_supervisor")
-leadgen_builder.add_edge("classify_and_seed_supervisor", "research_supervisor")
-leadgen_builder.add_edge("research_supervisor", "get_leads")  # supervisor can delegate to lead generation
-leadgen_builder.add_edge("get_leads", END)  # leads → end
+# Both workflows start from classify_and_seed_supervisor
+leadgen_builder.add_edge("classify_and_seed_supervisor", "research_supervisor")  # supervisor path
+leadgen_builder.add_edge("classify_and_seed_supervisor", "dotdb_generate_leads")  # dotdb path (parallel)
+# Both workflows converge at get_leads
+leadgen_builder.add_edge("research_supervisor", "get_leads")
+leadgen_builder.add_edge("dotdb_generate_leads", "get_leads")
+leadgen_builder.add_edge("get_leads", END)
 
 # Compiled graph
 leadgen_researcher = leadgen_builder.compile()

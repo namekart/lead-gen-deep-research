@@ -160,3 +160,105 @@ After each ConductResearch tool call, use think_tool to analyze the results:
 - Do NOT use acronyms or abbreviations in your research questions, be very clear and specific
 - Prioritize companies that match the buyer personas and classification categories
 </Scaling Rules>"""
+
+# DotDB keyword generation prompt (exact specification)
+DOTDB_KEYWORD_GEN_PROMPT = """I want to sell the domain: {domain_name}.
+Generate DotDB search terms (exact-match candidates) whose current owners are the most likely buyers of my domain.
+Follow these rules strictly:
+1. Treat the full domain phrase as the root.
+
+    * Extract the SLD (everything before the TLD).
+
+    * Keep all words and order (e.g., “california attorney” → root phrase = “california attorney”).
+
+    * Do not collapse to a single generic word unless the domain itself is a single word.
+
+2. Component analysis (use all of them):
+
+    * Geo terms (countries, states, provinces, major cities, accepted abbreviations: e.g., “CA” for California).
+
+    * Industry/intent terms (profession, product, service, niche specialties).
+
+    * Brand/organizational terms (group, partners, clinic, studio, works, labs, corp, inc, plc, ltd, llp).
+
+    * Marketing prefixes/suffixes (my, get, go, hire, find, best, pro, hub).
+
+    * Extension semantics (if TLD implies meaning: .works/.law/.shop/.ai, add aligned terms).
+
+    * Misspellings/variants (if the domain looks misspelled, include both the original and the corrected families).
+
+3. Top Tier first (5–12 items).
+Select multi-word queries (prefer the full phrase preserved) that jointly maximize:
+
+    * Lead Volume: likely many exact-match domains exist.
+
+    * Buyer Intent: owners of those matches have a strong reason to acquire my domain.
+For each Top-Tier item, include short tags: (Volume 1–5, Intent 1–5, Rationale ≤6 words).
+
+4. Coverage mix (70/30 rule).
+
+    * ≥70% of all outputs must include all primary components of the root phrase (e.g., both “{root_example_a}” and “{root_example_b}”).
+
+    * ≤30% may be strong adjacent phrases (e.g., “{adjacent_example_1}”, “{adjacent_example_2}”, specialty+geo).
+
+5. Output groups (after Top Tier):
+
+    * Exact-Phrase Family: exact phrase, hyphen/no-hyphen, singular/plural, order-swaps commonly used, light morphology.
+
+    * Geo-Expanded Family: root phrase + state/city/region variants and accepted abbreviations (cap cities to the 8–12 most prominent).
+
+    * Specialty/Niche Family: root phrase + high-value specialties (e.g., injury, immigration, enterprise, pediatric, SaaS, etc. as relevant).
+
+    * Brand/Org Structure Family: root phrase + group/partners/clinic/studio/works/labs/corp/inc/plc/ltd/llp/foundation/association.
+
+    * Marketing/Affiliate Family: my/get/go/hire/find/best/pro + root phrase (and tasteful suffixes: now, hub).
+
+    * Abbreviation/Shortform Family: accepted shortforms while keeping full meaning (e.g., “caattorney”, “attorneyca”).
+
+    * Misspelling/Defensive Family (if applicable): preserve suspected typo + corrected form.
+
+6. Formatting & quantity.
+
+    * Start with 🏆 Top Tier (scored).
+
+    * Then the groups above as bullet lists (clean, one term per bullet).
+
+    * Target 40–80 total search terms.
+
+    * No explanations except the Top-Tier tags.
+
+    * At the very end, output a single machine-readable line:
+      JSON_TOP_TIER: ["kw1", "kw2", ...]
+      - Include ONLY the Top Tier keyword strings in this JSON array
+      - Do NOT include tags in the JSON values
+      - Keep original spacing and hyphenation in the strings
+
+7. Exclusions / discipline.
+
+    * Do not output generic single words unless the domain itself is a single word; if included, they must also appear combined with the other core component(s).
+
+    * Avoid awkward, spammy, or over-long strings.
+
+Mini Example (for “californiaattorney.com”)
+🏆 Top Tier
+* californiaattorney (Vol 5, Intent 5, exact brand match)
+
+* california injury attorney (Vol 5, Intent 5, high-fee niche)
+
+* california divorce attorney (Vol 4, Intent 5, urgent consumer need)
+
+* california immigration attorney (Vol 4, Intent 5, evergreen demand)
+
+* attorney california (Vol 5, Intent 4, order swap common)
+
+* ca attorney (Vol 5, Intent 3, abbrev coverage)
+
+* california lawyer (Vol 5, Intent 4, synonym capture)
+
+* los angeles attorney (Vol 5, Intent 4, top city buyer)
+
+(Then proceed with the grouped families per rules.)
+
+Machine-readable example for the same Top Tier list above:
+JSON_TOP_TIER: ["californiaattorney", "california injury attorney", "california divorce attorney", "california immigration attorney", "attorney california", "ca attorney", "california lawyer", "los angeles attorney"]
+"""

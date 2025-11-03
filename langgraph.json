@@ -2,7 +2,8 @@
     "dockerfile_lines": [],
     "graphs": {
       "Deep Researcher": "./src/open_deep_research/deep_researcher.py:deep_researcher",
-      "Lead Gen": "./src/lead_gen/agent.py:leadgen_researcher"
+      "Lead Gen": "./src/lead_gen/agent.py:leadgen_researcher",
+      "DotDB Leads": "./src/lead_gen/dotdb_subgraph.py:dotdb_standalone"
     },
     "python_version": "3.11",
     "env": "./.env",
