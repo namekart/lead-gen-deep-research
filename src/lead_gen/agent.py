@@ -1,6 +1,9 @@
 # src/lead_gen/agent.py
 
 from typing import Annotated, List, Optional, Dict, Any
+from urllib.parse import urlparse
+
+import tldextract
 
 from langchain_core.messages import HumanMessage, SystemMessage, MessageLikeRepresentation
 from langchain_core.runnables import RunnableConfig
@@ -24,6 +27,10 @@ from pydantic import BaseModel, Field
 
 from lead_gen.classify_prompts import classification_and_buyers_prompt, CLASSIFICATION_GUIDE, leadgen_supervisor_prompt
 from lead_gen.dotdb_subgraph import dotdb_subgraph
+
+
+# Initialize tldextract without disk cache or network requests
+_EXTRACTOR = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=None)
 
 
 class LeadGenInputState(TypedDict):
@@ -107,25 +114,77 @@ async def classify_and_seed_supervisor(state: LeadGenState, config: RunnableConf
     }
 
 
-async def get_leads(state: LeadGenState, _config: Optional[RunnableConfig] = None):
-    """Return merged leads from both supervisor and dotdb workflows.
+def normalize_website(website: str) -> str:
+    """Normalize website URL for deduplication using tldextract.
+
+    Extracts the registered domain (domain + suffix) from URLs, handling:
+    - Standard TLDs (com, org, io, etc.)
+    - Two-part TLDs (co.uk, com.au, etc.)
+    - Complex TLDs (parliament.uk, etc.)
+    - Subdomains (www, api, etc.)
+    - Protocols (http://, https://)
+    - Paths and query parameters
+
+    Args:
+        website: Website URL or domain string
+
+    Returns:
+        Normalized domain string (registered_domain in lowercase)
+
+    Examples:
+        "https://www.example.com/path" -> "example.com"
+        "http://api.example.co.uk" -> "example.co.uk"
+        "www.test.io" -> "test.io"
+    """
+    if not website:
+        return ""
+
+    # Remove whitespace
+    website = website.strip()
+
+    # Extract domain components using tldextract
+    extracted = _EXTRACTOR(website)
+
+    # Build registered domain (domain + suffix)
+    # If no suffix, just use domain (for localhost, IP addresses, etc.)
+    if extracted.suffix:
+        registered_domain = f"{extracted.domain}.{extracted.suffix}".lower()
+    elif extracted.domain:
+        registered_domain = extracted.domain.lower()
+    else:
+        # Fallback: try to extract from URL if tldextract fails
+        try:
+            if not website.startswith(("http://", "https://")):
+                website = f"https://{website}"
+            parsed = urlparse(website)
+            domain = parsed.netloc or parsed.path.split("/")[0]
+            registered_domain = domain.lower().strip("/")
+        except Exception:
+            registered_domain = website.lower()
+
+    return registered_domain
+
+
+async def dedupe_leads(state: LeadGenState, _config: Optional[RunnableConfig] = None):
+    """Deduplicate leads based on normalized website URLs.
+
+    Uses a dictionary-based approach for O(1) lookup and replacement.
+    When duplicates are found, keeps the lead with more information.
 
     Args:
         state: Current LeadGenState containing leads from both workflows
         config: Runtime configuration (unused, kept for compatibility)
 
     Returns:
-        Dictionary containing the merged leads
+        Dictionary containing deduplicated leads
     """
     # Get leads from state (merged by override_reducer from both workflows)
     leads = state.get("leads", [])
 
     # Convert dict leads to Lead objects if needed
-    # (assuming supervisor may return Lead objects and dotdb returns dicts)
     processed_leads = []
     for lead in leads:
         if isinstance(lead, dict):
-            # Convert dict to Lead object
             processed_leads.append(Lead(**lead))
         elif isinstance(lead, Lead):
             processed_leads.append(lead)
@@ -133,7 +192,114 @@ async def get_leads(state: LeadGenState, _config: Optional[RunnableConfig] = Non
             # Keep as is if already in correct format
             processed_leads.append(lead)
 
-    return {"leads": processed_leads}
+    # Deduplicate based on normalized website using dict for efficient lookup
+    # Key: normalized domain, Value: (index in deduplicated list, Lead object)
+    seen_domains: Dict[str, tuple[int, Lead]] = {}
+    deduplicated: List[Lead] = []
+
+    for lead in processed_leads:
+        normalized = normalize_website(lead.website)
+
+        if not normalized:
+            # Keep leads with empty/missing websites
+            deduplicated.append(lead)
+            continue
+
+        if normalized not in seen_domains:
+            # First occurrence of this domain
+            index = len(deduplicated)
+            deduplicated.append(lead)
+            seen_domains[normalized] = (index, lead)
+        else:
+            # Duplicate domain found - keep the one with more information
+            existing_index, existing_lead = seen_domains[normalized]
+            # Prefer lead with longer detailed_summary or more metadata
+            should_replace = (
+                len(lead.detailed_summary) > len(existing_lead.detailed_summary)
+                or (lead.meta_data and not existing_lead.meta_data)
+            )
+
+            if should_replace:
+                # Replace existing with better lead
+                deduplicated[existing_index] = lead
+                seen_domains[normalized] = (existing_index, lead)
+
+    return {
+        "leads": {
+            "type": "override",
+            "value": deduplicated,
+        }
+    }
+
+
+async def get_leads(state: LeadGenState, _config: Optional[RunnableConfig] = None):
+    """Return final leads from state, ensuring they are deduplicated and properly formatted.
+
+    This node reads the leads from state (which should already be deduplicated by dedupe_leads),
+    but performs a final deduplication check to ensure no duplicates exist, especially after
+    serialization/deserialization when viewing traces.
+
+    Args:
+        state: Current LeadGenState containing leads from both workflows
+        config: Runtime configuration (unused, kept for compatibility)
+
+    Returns:
+        Dictionary containing the final deduplicated leads
+    """
+    # Get leads from state (should already be deduplicated, but we'll verify)
+    leads = state.get("leads", [])
+
+    # Convert dict leads to Lead objects if needed
+    # (handles serialization/deserialization from traces)
+    processed_leads = []
+    for lead in leads:
+        if isinstance(lead, dict):
+            # Convert dict to Lead object (from serialized state)
+            processed_leads.append(Lead(**lead))
+        elif isinstance(lead, Lead):
+            processed_leads.append(lead)
+        else:
+            # Keep as is if already in correct format
+            processed_leads.append(lead)
+
+    # Final deduplication pass to ensure no duplicates after serialization/deserialization
+    # This is especially important when viewing shared traces where state might be recreated
+    seen_domains: Dict[str, tuple[int, Lead]] = {}
+    final_leads: List[Lead] = []
+
+    for lead in processed_leads:
+        normalized = normalize_website(lead.website)
+
+        if not normalized:
+            # Keep leads with empty/missing websites
+            final_leads.append(lead)
+            continue
+
+        if normalized not in seen_domains:
+            # First occurrence of this domain
+            index = len(final_leads)
+            final_leads.append(lead)
+            seen_domains[normalized] = (index, lead)
+        else:
+            # Duplicate domain found - keep the one with more information
+            existing_index, existing_lead = seen_domains[normalized]
+            should_replace = (
+                len(lead.detailed_summary) > len(existing_lead.detailed_summary)
+                or (lead.meta_data and not existing_lead.meta_data)
+            )
+
+            if should_replace:
+                # Replace existing with better lead
+                final_leads[existing_index] = lead
+                seen_domains[normalized] = (existing_index, lead)
+
+    # Use override pattern to ensure state is cleanly updated
+    return {
+        "leads": {
+            "type": "override",
+            "value": final_leads,
+        }
+    }
 
 
 async def dotdb_generate_leads(state: LeadGenState, config: RunnableConfig) -> Dict:
@@ -160,13 +326,14 @@ async def dotdb_generate_leads(state: LeadGenState, config: RunnableConfig) -> D
 
 
 # Build the LeadGen graph with parallel workflows
-# Flow: classify → (supervisor || dotdb) → merge → get_leads
+# Flow: classify → (supervisor || dotdb) → dedupe → get_leads
 leadgen_builder = StateGraph(LeadGenState, input=LeadGenInputState, config_schema=Configuration)
 
 # Nodes
 leadgen_builder.add_node("classify_and_seed_supervisor", classify_and_seed_supervisor)
 leadgen_builder.add_node("research_supervisor", supervisor_subgraph)  # supervisor workflow
 leadgen_builder.add_node("dotdb_generate_leads", dotdb_generate_leads)  # dotdb+jina→leads
+leadgen_builder.add_node("dedupe_leads", dedupe_leads)  # deduplicate leads
 leadgen_builder.add_node("get_leads", get_leads)  # merge and return leads
 # final_report_generation is intentionally disabled for LeadGen flow
 
@@ -175,9 +342,11 @@ leadgen_builder.add_edge(START, "classify_and_seed_supervisor")
 # Both workflows start from classify_and_seed_supervisor
 leadgen_builder.add_edge("classify_and_seed_supervisor", "research_supervisor")  # supervisor path
 leadgen_builder.add_edge("classify_and_seed_supervisor", "dotdb_generate_leads")  # dotdb path (parallel)
-# Both workflows converge at get_leads
-leadgen_builder.add_edge("research_supervisor", "get_leads")
-leadgen_builder.add_edge("dotdb_generate_leads", "get_leads")
+# Both workflows converge at dedupe_leads
+leadgen_builder.add_edge("research_supervisor", "dedupe_leads")
+leadgen_builder.add_edge("dotdb_generate_leads", "dedupe_leads")
+# Dedupe then goes to get_leads
+leadgen_builder.add_edge("dedupe_leads", "get_leads")
 leadgen_builder.add_edge("get_leads", END)
 
 # Compiled graph
