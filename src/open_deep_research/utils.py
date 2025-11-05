@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import os
+import re
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
+from urllib.parse import quote_plus
 
 import aiohttp
 from langchain.chat_models import init_chat_model
@@ -36,6 +38,169 @@ from open_deep_research.state import ResearchComplete, Summary
 from langchain_core.tools import tool
 from lead_gen.configuration import LeadGenConfiguration
 from lead_gen.clients.scraping_client import ScraperClient
+
+##########################
+# Jina Search Tool Utils
+##########################
+
+JINA_SEARCH_DESCRIPTION = (
+    "Search the web using Jina AI to find relevant websites and extract their content. "
+    "Useful for finding companies, products, services, and detailed information."
+)
+
+@tool(description=JINA_SEARCH_DESCRIPTION)
+async def jina_search(
+    queries: List[str],
+    max_results: Annotated[int, InjectedToolArg] = 5,
+    topic: Annotated[Literal["general", "news", "finance"], InjectedToolArg] = "general",
+    config: RunnableConfig = None
+) -> str:
+    """Fetch and format search results from Jina AI API using general queries.
+
+    This function makes direct requests to Jina API for general search queries,
+    not just domain lookups. It uses the format: GET https://s.jina.ai/?q={query}
+
+    Args:
+        queries: List of search queries to execute
+        max_results: Maximum number of results to return per query
+        topic: Topic filter (for compatibility with tavily_search, ignored by Jina)
+        config: Runtime configuration for API keys and model settings
+
+    Returns:
+        Formatted string containing summarized search results (same format as tavily_search)
+    """
+    configurable = Configuration.from_runnable_config(config)
+    api_key = get_jina_api_key(config)
+
+    if not api_key:
+        return "Jina API key is required. Set JINA_API_KEY environment variable."
+
+    # Step 1: Execute search queries asynchronously
+    search_tasks = []
+    base_url = "https://s.jina.ai"
+
+    for query in queries:
+        encoded_query = quote_plus(query)
+        url = f"{base_url}/?q={encoded_query}"
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "X-Engine": "browser",
+            "X-Retain-Images": "none"
+        }
+
+        async def fetch_query(query_str: str, url_str: str, headers_dict: dict):
+            """Fetch results for a single query."""
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url_str, headers=headers_dict, timeout=30) as resp:
+                        response_data = await resp.json()
+
+                        if response_data.get("code") == 200 and response_data.get("status") == 20000:
+                            # Jina API returns JSON with data array
+                            data = response_data.get("data", [])
+                            results = []
+
+                            for item in data[:max_results]:
+                                # Map Jina API response structure
+                                results.append({
+                                    "title": item.get("title", ""),
+                                    "url": item.get("url", ""),
+                                    "content": item.get("description", ""),
+                                    "raw_content": item.get("content", "")
+                                })
+
+                            return {
+                                "query": query_str,
+                                "results": results
+                            }
+                        else:
+                            error_msg = response_data.get("readableMessage") or response_data.get("message", "Unknown error")
+                            logging.warning(f"Jina search failed for query '{query_str}': {error_msg}")
+                            return {"query": query_str, "results": []}
+            except Exception as e:
+                logging.warning(f"Jina API request failed for query '{query_str}': {str(e)}")
+                return {"query": query_str, "results": []}
+
+        search_tasks.append(fetch_query(query, url, headers))
+
+    search_results = await asyncio.gather(*search_tasks)
+
+    # Step 2: Deduplicate results by URL (same as tavily_search)
+    unique_results = {}
+    for response in search_results:
+        for result in response.get("results", []):
+            url = result.get("url", "")
+            if url and url not in unique_results:
+                unique_results[url] = {**result, "query": response.get("query", "")}
+
+    # Step 3: Set up the summarization model with configuration (same as tavily_search)
+    max_char_to_include = configurable.max_content_length
+
+    # Initialize summarization model with retry logic
+    model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+    summarization_model = init_chat_model(
+        model=normalize_model_name(configurable.summarization_model),
+        model_provider=get_model_provider_for_model(configurable.summarization_model),
+        base_url=get_base_url_for_model(configurable.summarization_model),
+        max_tokens=configurable.summarization_model_max_tokens,
+        api_key=model_api_key,
+        tags=["langsmith:nostream"]
+    ).with_structured_output(Summary).with_retry(
+        stop_after_attempt=configurable.max_structured_output_retries
+    )
+
+    # Step 4: Create summarization tasks (skip empty content)
+    async def noop():
+        """No-op function for results without raw content."""
+        return None
+
+    summarization_tasks = [
+        noop() if not result.get("raw_content")
+        else summarize_webpage(
+            summarization_model,
+            result['raw_content'][:max_char_to_include]
+        )
+        for result in unique_results.values()
+    ]
+
+    # Step 5: Execute all summarization tasks in parallel
+    summaries = await asyncio.gather(*summarization_tasks)
+
+    # Step 6: Combine results with their summaries
+    summarized_results = {
+        url: {
+            'title': result['title'],
+            'content': result['content'] if summary is None else summary
+        }
+        for url, result, summary in zip(
+            unique_results.keys(),
+            unique_results.values(),
+            summaries
+        )
+    }
+
+    # Step 7: Format the final output (same format as tavily_search)
+    if not summarized_results:
+        return "No valid search results found. Please try different search queries or use a different search API."
+
+    formatted_output = "Search results: \n\n"
+    for i, (url, result) in enumerate(summarized_results.items()):
+        formatted_output += f"\n\n--- SOURCE {i+1}: {result['title']} ---\n"
+        formatted_output += f"URL: {url}\n\n"
+        formatted_output += f"SUMMARY:\n{result['content']}\n\n"
+        formatted_output += "\n\n" + "-" * 80 + "\n"
+
+    return formatted_output
+
+def get_jina_api_key(config: RunnableConfig):
+    """Get Jina API key from environment or config."""
+    configurable = config.get("configurable", {}) if config else {}
+    api_keys = configurable.get("api_keys", {})
+    if api_keys:
+        return api_keys.get("JINA_API_KEY")
+    return os.getenv("JINA_API_KEY")
 
 
 ##########################
@@ -539,7 +704,7 @@ async def get_search_tool(search_api: SearchAPI):
     """Configure and return search tools based on the specified API provider.
 
     Args:
-        search_api: The search API provider to use (Anthropic, OpenAI, Tavily, or None)
+        search_api: The search API provider to use (Anthropic, OpenAI, Tavily, Jina, or None)
 
     Returns:
         List of configured search tool objects for the specified provider
@@ -566,13 +731,22 @@ async def get_search_tool(search_api: SearchAPI):
         }
         return [search_tool]
 
+    elif search_api == SearchAPI.JINA:  # Add this
+        # Configure Jina search tool with metadata
+        search_tool = jina_search
+        search_tool.metadata = {
+            **(search_tool.metadata or {}),
+            "type": "search",
+            "name": "web_search"
+        }
+        return [search_tool]
+
     elif search_api == SearchAPI.NONE:
         # No search functionality configured
         return []
 
     # Default fallback for unknown search API types
     return []
-
 async def get_all_tools(config: RunnableConfig):
     """Assemble complete toolkit including research, search, and MCP tools.
 

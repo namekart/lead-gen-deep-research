@@ -14,6 +14,7 @@ class SearchAPI(Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     TAVILY = "tavily"
+    JINA = "jina"
     NONE = "none"
 
 class MCPConfig(BaseModel):
@@ -76,7 +77,7 @@ class Configuration(BaseModel):
     )
     # Research Configuration
     search_api: SearchAPI = Field(
-        default=SearchAPI.TAVILY,
+        default=SearchAPI.JINA,
         metadata={
             "x_oap_ui_config": {
                 "type": "select",
@@ -86,6 +87,7 @@ class Configuration(BaseModel):
                     {"label": "Tavily", "value": SearchAPI.TAVILY.value},
                     {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
                     {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
+                    {"label": "Jina", "value": SearchAPI.JINA.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
                 ]
             }
