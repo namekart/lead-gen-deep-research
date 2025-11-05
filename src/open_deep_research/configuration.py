@@ -62,6 +62,7 @@ class Configuration(BaseModel):
             }
         }
     )
+    # parallel sub-agents
     max_concurrent_research_units: int = Field(
         default=5,
         metadata={
@@ -93,12 +94,13 @@ class Configuration(BaseModel):
             }
         }
     )
+    # supervisor cycles
     max_researcher_iterations: int = Field(
-        default=3,
+        default=5,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 3,
+                "default": 5,
                 "min": 1,
                 "max": 10,
                 "step": 1,
@@ -106,6 +108,7 @@ class Configuration(BaseModel):
             }
         }
     )
+    # per researcher iterations
     max_react_tool_calls: int = Field(
         default=4,
         metadata={

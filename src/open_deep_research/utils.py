@@ -78,6 +78,7 @@ async def jina_search(
     # Step 1: Execute search queries asynchronously
     search_tasks = []
     base_url = "https://s.jina.ai"
+    logging.info("[jina_search] start queries=%s max_results=%d", queries, max_results)
 
     for query in queries:
         encoded_query = quote_plus(query)
@@ -94,12 +95,14 @@ async def jina_search(
             """Fetch results for a single query."""
             try:
                 async with aiohttp.ClientSession() as session:
+                    logging.debug("[jina_search] GET %s", url_str)
                     async with session.get(url_str, headers=headers_dict, timeout=30) as resp:
                         response_data = await resp.json()
 
                         if response_data.get("code") == 200 and response_data.get("status") == 20000:
                             # Jina API returns JSON with data array
                             data = response_data.get("data", [])
+                            logging.debug("[jina_search] ok query='%s' items=%d", query_str, len(data))
                             results = []
 
                             for item in data[:max_results]:
@@ -117,10 +120,10 @@ async def jina_search(
                             }
                         else:
                             error_msg = response_data.get("readableMessage") or response_data.get("message", "Unknown error")
-                            logging.warning(f"Jina search failed for query '{query_str}': {error_msg}")
+                            logging.warning("[jina_search] failed query='%s' error=%s", query_str, error_msg)
                             return {"query": query_str, "results": []}
             except Exception as e:
-                logging.warning(f"Jina API request failed for query '{query_str}': {str(e)}")
+                logging.warning("[jina_search] exception query='%s' err=%s", query_str, str(e))
                 return {"query": query_str, "results": []}
 
         search_tasks.append(fetch_query(query, url, headers))
@@ -134,6 +137,7 @@ async def jina_search(
             url = result.get("url", "")
             if url and url not in unique_results:
                 unique_results[url] = {**result, "query": response.get("query", "")}
+    logging.info("[jina_search] done queries=%d unique_results=%d", len(queries), len(unique_results))
 
     # Step 3: Set up the summarization model with configuration (same as tavily_search)
     max_char_to_include = configurable.max_content_length
@@ -193,6 +197,63 @@ async def jina_search(
         formatted_output += "\n\n" + "-" * 80 + "\n"
 
     return formatted_output
+
+##########################
+# Jina Reader Tool Utils
+##########################
+
+JINA_READER_DESCRIPTION = (
+    "Read a specific webpage using Jina Reader (r.jina.ai) and return markdown-like text. "
+    "Useful when you already know the target URL and want full page content."
+)
+
+@tool(description=JINA_READER_DESCRIPTION)
+async def jina_read_url(
+    url: str,
+    config: RunnableConfig = None
+) -> str:
+    """Fetch a single URL via Jina Reader and return the text content.
+
+    This uses: GET https://r.jina.ai/{url}
+    Headers: Authorization, X-Engine: browser, X-Retain-Images: none
+
+    Args:
+        url: The target URL to read (with or without protocol)
+        config: Runtime configuration for API key
+
+    Returns:
+        Text content returned by Jina Reader (includes Title, URL Source, Published Time, Markdown Content)
+    """
+    api_key = get_jina_api_key(config)
+    if not api_key:
+        return "Jina API key is required. Set JINA_API_KEY environment variable."
+
+    # Normalize URL
+    target = url.strip()
+    if not target.startswith("http://") and not target.startswith("https://"):
+        target = f"https://{target}"
+
+    reader_base = "https://r.jina.ai"
+    # r.jina.ai expects the full URL as path segment
+    reader_url = f"{reader_base}/{target}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-Engine": "browser",
+        "X-Retain-Images": "none",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            logging.debug("[jina_reader] GET %s", reader_url)
+            async with session.get(reader_url, headers=headers, timeout=45) as resp:
+                text_response = await resp.text()
+                if resp.status != 200:
+                    logging.warning("[jina_reader] failed url='%s' status=%s", url, resp.status)
+                return text_response
+    except Exception as e:
+        logging.warning("[jina_reader] exception url='%s' err=%s", url, str(e))
+        return ""
 
 def get_jina_api_key(config: RunnableConfig):
     """Get Jina API key from environment or config."""
@@ -777,6 +838,12 @@ async def get_all_tools(config: RunnableConfig):
     # Add MCP tools if configured
     mcp_tools = await load_mcp_tools(config, existing_tool_names)
     tools.extend(mcp_tools)
+
+    # Add Jina Reader tool (direct URL fetch)
+    try:
+        tools.append(jina_read_url)
+    except Exception:
+        pass
 
     return tools
 
