@@ -166,11 +166,11 @@ class Configuration(BaseModel):
         }
     )
     research_model_max_tokens: int = Field(
-        default=10000,
+        default=8000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 10000,
+                "default": 8000,
                 "description": "Maximum output tokens for research model"
             }
         }
