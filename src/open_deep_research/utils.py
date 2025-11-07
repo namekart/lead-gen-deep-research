@@ -1,31 +1,21 @@
 """Utility functions and helpers for the Deep Research agent."""
-
 import asyncio
 import logging
 import os
-import re
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
 from urllib.parse import quote_plus
 
 import aiohttp
-from langchain.chat_models import init_chat_model
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    MessageLikeRepresentation,
-    filter_messages,
-)
+
+from langchain.tools import InjectedToolArg, tool
+from langchain.chat_models import BaseChatModel, init_chat_model
+from langchain_core.messages import HumanMessage, AIMessage, MessageLikeRepresentation, filter_messages
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import (
-    BaseTool,
-    InjectedToolArg,
-    StructuredTool,
-    ToolException,
-    tool,
-)
+from langchain_core.tools import BaseTool, ToolException
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.config import get_store
 from mcp import McpError
@@ -35,7 +25,6 @@ from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
 
-from langchain_core.tools import tool
 from lead_gen.configuration import LeadGenConfiguration
 from lead_gen.clients.scraping_client import ScraperClient
 
@@ -206,36 +195,25 @@ JINA_READER_DESCRIPTION = (
     "Read a specific webpage using Jina Reader (r.jina.ai) and return markdown-like text. "
     "Useful when you already know the target URL and want full page content."
 )
-
 @tool(description=JINA_READER_DESCRIPTION)
-async def jina_read_url(
-    url: str,
-    config: RunnableConfig = None
-) -> str:
-    """Fetch a single URL via Jina Reader and return the text content.
-
-    This uses: GET https://r.jina.ai/{url}
-    Headers: Authorization, X-Engine: browser, X-Retain-Images: none
-
+async def jina_read_url(url: str, config: Optional[dict] = None) -> str:
+    """
+    Fetch a URL using Jina Reader endpoint and return summarized content.
     Args:
-        url: The target URL to read (with or without protocol)
-        config: Runtime configuration for API key
-
+        url: Target URL, may or may not include scheme.
+        config: Optional configuration dict for runtime.
     Returns:
-        Text content returned by Jina Reader (includes Title, URL Source, Published Time, Markdown Content)
+        A summary string, or empty string on error/no content.
     """
     api_key = get_jina_api_key(config)
     if not api_key:
         return "Jina API key is required. Set JINA_API_KEY environment variable."
 
-    # Normalize URL
+    # Normalize URL: ensure it has a protocol
     target = url.strip()
-    if not target.startswith("http://") and not target.startswith("https://"):
+    if not target.startswith(("http://", "https://")):
         target = f"https://{target}"
-
-    reader_base = "https://r.jina.ai"
-    # r.jina.ai expects the full URL as path segment
-    reader_url = f"{reader_base}/{target}"
+    reader_url = f"https://r.jina.ai/{target}"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -246,14 +224,106 @@ async def jina_read_url(
     try:
         async with aiohttp.ClientSession() as session:
             logging.debug("[jina_reader] GET %s", reader_url)
-            async with session.get(reader_url, headers=headers, timeout=45) as resp:
-                text_response = await resp.text()
+            async with session.get(reader_url, headers=headers, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+                page_text = await resp.text()
                 if resp.status != 200:
                     logging.warning("[jina_reader] failed url='%s' status=%s", url, resp.status)
-                return text_response
+
+        if not page_text:
+            return ""
+
+        # Load config for model settings
+        cfg = Configuration.from_runnable_config(config)
+        model_name = normalize_model_name(cfg.summarization_model)
+        provider = get_model_provider_for_model(cfg.summarization_model)
+        base_url = get_base_url_for_model(cfg.summarization_model)
+        api_model_key = get_api_key_for_model(cfg.summarization_model, config)
+
+        # Step 1: Split the full text from Jina into chunks
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1800, chunk_overlap=180)
+        chunks = splitter.split_text(page_text)
+        docs: List[Document] = [Document(page_content=chunk) for chunk in chunks]
+
+        if not docs:
+            return page_text
+
+        # Step 2: Summarize each chunk (map step)
+        # Use configurable_model pattern for proper isolation from conversation history
+        from open_deep_research.deep_researcher import configurable_model
+
+        clean_model_config = {
+            "model": model_name,
+            "model_provider": provider,
+            "base_url": base_url,
+            "max_tokens": cfg.summarization_model_max_tokens,
+            "api_key": api_model_key,
+            "tags": ["langsmith:nostream"],
+        }
+
+        # Empty config to prevent any conversation history leakage
+        empty_config = {"configurable": {}, "metadata": {}, "tags": []}
+
+        summary_parts = []
+        for doc in docs:
+            # Create a fresh model instance for each chunk using configurable_model
+            # This ensures complete isolation from any conversation context
+            chunk_llm = (
+                configurable_model
+                .with_config(clean_model_config)
+                .with_retry(stop_after_attempt=cfg.max_structured_output_retries)
+            )
+
+            prompt_text = (
+                "Please summarise the following text concisely:\n\n"
+                f"{doc.page_content}\n\n"
+                "Provide a concise summary focusing on key information."
+            )
+            # Create completely fresh message list - no conversation history
+            # Pass empty config to ensure no context leaks in
+            response = await chunk_llm.ainvoke(
+                [HumanMessage(content=prompt_text)],
+                config=empty_config
+            )
+            part = response.content if hasattr(response, "content") else str(response)
+            summary_parts.append(part.strip())
+
+        # Step 3: Combine all chunk summaries into final summary (reduce step)
+        if not summary_parts:
+            return page_text
+
+        combined = "\n\n".join(summary_parts)
+        final_prompt = (
+            "You have summaries of different parts of a webpage. "
+            "Combine them into a single, coherent, concise summary of the entire content.\n\n"
+            "Summaries:\n"
+            f"{combined}\n\n"
+            "Provide a final comprehensive summary."
+        )
+
+        # Create a completely fresh model instance for final summarization
+        # Using configurable_model ensures no conversation history or tool bindings leak in
+        final_llm = (
+            configurable_model
+            .with_config(clean_model_config)
+            .with_retry(stop_after_attempt=cfg.max_structured_output_retries)
+        )
+
+        final_response = await final_llm.ainvoke(
+            [HumanMessage(content=final_prompt)],
+            config=empty_config
+        )
+        final_summary = (
+            final_response.content
+            if hasattr(final_response, "content")
+            else str(final_response)
+        )
+
+        return final_summary.strip()
+
     except Exception as e:
         logging.warning("[jina_reader] exception url='%s' err=%s", url, str(e))
         return ""
+
 
 def get_jina_api_key(config: RunnableConfig):
     """Get Jina API key from environment or config."""
@@ -615,7 +685,7 @@ async def fetch_tokens(config: RunnableConfig) -> dict[str, Any]:
     await set_tokens(config, mcp_tokens)
     return mcp_tokens
 
-def wrap_mcp_authenticate_tool(tool: StructuredTool) -> StructuredTool:
+def wrap_mcp_authenticate_tool(tool: BaseTool) -> BaseTool:
     """Wrap MCP tool with comprehensive authentication and error handling.
 
     Args:
@@ -695,6 +765,7 @@ async def load_mcp_tools(
     configurable = Configuration.from_runnable_config(config)
 
     # Step 1: Handle authentication if required
+    # pylint: disable=no-member
     if configurable.mcp_config and configurable.mcp_config.auth_required:
         mcp_tokens = await fetch_tokens(config)
     else:
@@ -707,12 +778,15 @@ async def load_mcp_tools(
         configurable.mcp_config.tools and
         (mcp_tokens or not configurable.mcp_config.auth_required)
     )
+    # pylint: enable=no-member
 
     if not config_valid:
         return []
 
     # Step 3: Set up MCP server connection
+    # pylint: disable=no-member
     server_url = configurable.mcp_config.url.rstrip("/") + "/mcp"
+    # pylint: enable=no-member
 
     # Configure authentication headers if tokens are available
     auth_headers = None
@@ -747,8 +821,10 @@ async def load_mcp_tools(
             continue
 
         # Only include tools specified in configuration
+        # pylint: disable=no-member
         if mcp_tool.name not in set(configurable.mcp_config.tools):
             continue
+        # pylint: enable=no-member
 
         # Wrap tool with authentication handling and add to list
         enhanced_tool = wrap_mcp_authenticate_tool(mcp_tool)
@@ -1007,7 +1083,7 @@ def _check_anthropic_token_limit(exception: Exception, error_str: str) -> bool:
 
     return False
 
-def _check_gemini_token_limit(exception: Exception, error_str: str) -> bool:
+def _check_gemini_token_limit(exception: Exception, _error_str: str) -> bool:
     """Check if exception indicates Google/Gemini token limit exceeded."""
     # Analyze exception metadata
     exception_type = str(type(exception))
@@ -1230,7 +1306,7 @@ SCRAPING_TOOL_DESCRIPTION = (
 @tool(description=SCRAPING_TOOL_DESCRIPTION)
 async def scraping_company_info(
     company_domain: str,
-    config: RunnableConfig = None
+    _config: RunnableConfig = None
 ) -> dict | None:
     """Fetch company info via the scraping client for the given domain."""
     cfg = LeadGenConfiguration()
