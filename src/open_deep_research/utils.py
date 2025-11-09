@@ -264,9 +264,9 @@ async def jina_read_url(url: str, config: Optional[dict] = None) -> str:
         empty_config = {"configurable": {}, "metadata": {}, "tags": []}
 
         summary_parts = []
+        # Create all summarization tasks
+        chunk_tasks = []
         for doc in docs:
-            # Create a fresh model instance for each chunk using configurable_model
-            # This ensures complete isolation from any conversation context
             chunk_llm = (
                 configurable_model
                 .with_config(clean_model_config)
@@ -278,14 +278,22 @@ async def jina_read_url(url: str, config: Optional[dict] = None) -> str:
                 f"{doc.page_content}\n\n"
                 "Provide a concise summary focusing on key information."
             )
-            # Create completely fresh message list - no conversation history
-            # Pass empty config to ensure no context leaks in
-            response = await chunk_llm.ainvoke(
+            # Create task (don't await yet)
+            task = chunk_llm.ainvoke(
                 [HumanMessage(content=prompt_text)],
                 config=empty_config
             )
-            part = response.content if hasattr(response, "content") else str(response)
-            summary_parts.append(part.strip())
+            chunk_tasks.append(task)
+
+        # Execute all chunks in parallel
+        chunk_responses = await asyncio.gather(*chunk_tasks)
+
+        # Extract content from responses
+        summary_parts = [
+            response.content if hasattr(response, "content") else str(response)
+            for response in chunk_responses
+        ]
+        summary_parts = [part.strip() for part in summary_parts]
 
         # Step 3: Combine all chunk summaries into final summary (reduce step)
         if not summary_parts:
@@ -902,8 +910,12 @@ async def get_all_tools(config: RunnableConfig):
     search_tools = await get_search_tool(search_api)
     tools.extend(search_tools)
 
-    # Add scraping tool
-    tools.append(scraping_company_info)
+    # Add scraping tool if enabled
+    if configurable.enable_scraping_tool:
+        tools.append(scraping_company_info)
+        logging.info("[tools] Scraping tool (Tracxn) enabled")
+    else:
+        logging.info("[tools] Scraping tool (Tracxn) disabled via config")
 
     # Track existing tool names to prevent conflicts
     existing_tool_names = {
@@ -915,11 +927,15 @@ async def get_all_tools(config: RunnableConfig):
     mcp_tools = await load_mcp_tools(config, existing_tool_names)
     tools.extend(mcp_tools)
 
-    # Add Jina Reader tool (direct URL fetch)
-    try:
-        tools.append(jina_read_url)
-    except Exception:
-        pass
+    # Add Jina Reader tool if enabled (direct URL fetch)
+    if configurable.enable_jina_reader:
+        try:
+            tools.append(jina_read_url)
+            logging.info("[tools] Jina Reader tool enabled")
+        except Exception as e:
+            logging.warning(f"[tools] Failed to load Jina Reader tool: {e}")
+    else:
+        logging.info("[tools] Jina Reader tool disabled via config")
 
     return tools
 
@@ -1308,7 +1324,11 @@ async def scraping_company_info(
     company_domain: str,
     _config: RunnableConfig = None
 ) -> dict | None:
-    """Fetch company info via the scraping client for the given domain."""
+    """Fetch company info via the scraping client (Tracxn-based) for the given domain.
+
+    WARNING: This tool is unreliable and often fails. Use only as a last resort
+    when web search and jina_read_url cannot find company information.
+    """
     cfg = LeadGenConfiguration()
     client = ScraperClient(cfg)
     return await client.get_company_info(company_domain)

@@ -94,6 +94,26 @@ class Configuration(BaseModel):
             }
         }
     )
+    enable_jina_reader: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable Jina Reader tool for reading full webpage content. Disable if experiencing API errors."
+            }
+        }
+    )
+    enable_scraping_tool: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable company scraping tool (Tracxn-based). Disable if unreliable or not needed."
+            }
+        }
+    )
     # supervisor cycles
     max_researcher_iterations: int = Field(
         default=5,

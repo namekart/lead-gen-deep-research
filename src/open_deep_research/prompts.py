@@ -146,7 +146,7 @@ You can use any of the tools provided to you to find resources that can help ans
 You have access to these tools:
 1. **web_search**: For conducting web searches to gather information
 2. **jina_read_url**: When you have a specific company URL, use this to read the full page content (Title, URL, Published Time, Markdown Content) via the browser engine.
-3. **scraping_company_info**: For fetching company information from the scraper API
+3. **scraping_company_info**: For fetching company information from the scraper API (Tracxn-based). **WARNING: This tool is unreliable and often fails or returns incomplete data. Only use as a last resort when you cannot find company information through web searches and jina_read_url.**
 4. **think_tool**: For reflection and strategic planning during research
 
 {mcp_prompt}
@@ -162,7 +162,8 @@ Think like a human researcher with limited time. Follow these steps:
 3. **After each search, pause and assess** - Do I have enough to answer? What's still missing?
 4. **When you identify a promising company or source URL** - Call jina_read_url to read and capture the full page content for accurate details (offerings, customers, contact, etc.)
 5. **Execute narrower searches as you gather information** - Fill in the gaps
-5. **Stop when you can answer confidently** - Don't keep searching for perfection
+6. **AVOID scraping_company_info unless absolutely necessary** - This tool is unreliable. Prefer web_search + jina_read_url to get company information from official websites, LinkedIn, Crunchbase, etc.
+7. **Stop when you can answer confidently** - Don't keep searching for perfection
 </Instructions>
 
 <Hard Limits>
