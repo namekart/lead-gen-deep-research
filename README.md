@@ -12,7 +12,7 @@ Deep research has broken out as one of the most popular agent applications. This
 
 **August 7, 2025**: Added GPT-5 and updated the Deep Research Bench evaluation w/ GPT-5 results.
 
-**August 2, 2025**: Achieved #6 ranking on the [Deep Research Bench Leaderboard](https://huggingface.co/spaces/Ayanami0730/DeepResearch-Leaderboard) with an overall score of 0.4344. 
+**August 2, 2025**: Achieved #6 ranking on the [Deep Research Bench Leaderboard](https://huggingface.co/spaces/Ayanami0730/DeepResearch-Leaderboard) with an overall score of 0.4344.
 
 **July 30, 2025**: Read about the evolution from our original implementations to the current version in our [blog post](https://rlancemartin.github.io/2025/07/30/bitter_lesson/).
 
@@ -61,7 +61,7 @@ Ask a question in the `messages` input field and click `Submit`. Select differen
 
 #### LLM :brain:
 
-Open Deep Research supports a wide range of LLM providers via the [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/). It uses LLMs for a few different tasks. See the below model fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI. 
+Open Deep Research supports a wide range of LLM providers via the [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/). It uses LLMs for a few different tasks. See the below model fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI.
 
 - **Summarization** (default: `openai:gpt-4.1-mini`): Summarizes search API results
 - **Research** (default: `openai:gpt-4.1`): Power the search agent
@@ -74,11 +74,11 @@ Open Deep Research supports a wide range of LLM providers via the [init_chat_mod
 
 #### Search API :mag:
 
-Open Deep Research supports a wide range of search tools. By default it uses the [Tavily](https://www.tavily.com/) search API. Has full MCP compatibility and work native web search for Anthropic and OpenAI. See the `search_api` and `mcp_config` fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI. 
+Open Deep Research supports a wide range of search tools. By default it uses the [Tavily](https://www.tavily.com/) search API. Has full MCP compatibility and work native web search for Anthropic and OpenAI. See the `search_api` and `mcp_config` fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI.
 
-#### Other 
+#### Other
 
-See the fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) for various other settings to customize the behavior of Open Deep Research. 
+See the fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) for various other settings to customize the behavior of Open Deep Research.
 
 ### 📊 Evaluation
 
@@ -103,7 +103,7 @@ python tests/extract_langsmith_data.py --project-name "YOUR_EXPERIMENT_NAME" --m
 
 This creates `tests/expt_results/deep_research_bench_model-name.jsonl` with the required format. Move the generated JSONL file to a local clone of the Deep Research Bench repository and follow their [Quick Start guide](https://github.com/Ayanami0730/deep_research_bench?tab=readme-ov-file#quick-start) for evaluation submission.
 
-#### Results 
+#### Results
 
 | Name | Commit | Summarization | Research | Compression | Total Cost | Total Tokens | RACE Score | Experiment |
 |------|--------|---------------|----------|-------------|------------|--------------|------------|------------|
@@ -119,8 +119,8 @@ This creates `tests/expt_results/deep_research_bench_model-name.jsonl` with the 
 Follow the [quickstart](#-quickstart) to start LangGraph server locally and test the agent out on LangGraph Studio.
 
 #### Hosted deployment
- 
-You can easily deploy to [LangGraph Platform](https://langchain-ai.github.io/langgraph/concepts/#deployment-options). 
+
+You can easily deploy to [LangGraph Platform](https://langchain-ai.github.io/langgraph/concepts/#deployment-options).
 
 #### Open Agent Platform
 
@@ -132,6 +132,306 @@ You can also deploy your own instance of OAP, and make your own custom agents (l
 1. [Deploy Open Agent Platform](https://docs.oap.langchain.com/quickstart)
 2. [Add Deep Researcher to OAP](https://docs.oap.langchain.com/setup/agents)
 
+### 🎯 Lead Generation Workflow
+
+The `src/lead_gen/` module implements a specialized **domain name brokerage lead generation system** built on top of the Deep Research framework. This workflow automates the process of identifying and qualifying potential buyers for premium domain names.
+
+#### Overview
+
+The Lead Gen workflow takes a domain name as input and produces a list of qualified B2B leads (companies/organizations) that would be interested in acquiring that domain. It combines:
+- **AI-powered classification** and buyer persona generation
+- **Parallel research workflows** for comprehensive coverage
+- **Domain database integration** (DotDB) for direct keyword matching
+- **Web validation** (Jina API) to ensure active businesses
+- **Intelligent deduplication** to ensure high-quality results
+
+#### Architecture
+
+```
+Input: domain_name (e.g., "californiaattorney.com")
+    ↓
+[1] classify_and_seed_supervisor
+    - Classify domain into categories (Generic, Geographic, Professional, etc.)
+    - Generate tiered buyer personas (Tier 1-4)
+    - Seed supervisor with classification context
+    ↓
+[2a] research_supervisor (Path 1)     [2b] dotdb_generate_leads (Path 2)
+     - AI research agents                   - Generate keywords
+     - Web search for companies             - Query DotDB API
+     - Company validation                   - Jina validation
+     - Lead extraction                      - LLM lead structuring
+    ↓                                       ↓
+[3] dedupe_leads
+    - Merge leads from both paths
+    - Normalize domains (handle www, http, https, subdomains)
+    - Remove duplicates (keep better lead)
+    ↓
+[4] get_leads
+    - Final deduplication check
+    - Format and return structured leads
+    ↓
+Output: List[Lead] with website, detailed_summary, rationale, tier, meta_data
+```
+
+#### Key Components
+
+##### 1. Domain Classification (`classify_and_seed_supervisor`)
+
+Analyzes the domain and assigns it to one or more categories:
+
+**Categories:**
+- **Generic Keywords**: e.g., `losangelespropertyattorney.com`
+- **Informational**: e.g., `howtomakemoney.com`
+- **Social Reform**: e.g., `educatethegirlchild.com`
+- **Category Killer**: e.g., `laptop.com`, `contactlense.com`
+- **Geographic**: e.g., `goisland.com`, `lasvegashotel.com`
+- **Product/Service**: e.g., `laptop.com`
+- **Professions**: e.g., `lawyer.in`, `doctor.com`
+- **Specific/Abbreviations**: e.g., `icici.com`, `db.com`
+- **Venture/Brandable**: e.g., `petfashion.com`
+- **Advertising/Marketing**: Campaign-focused domains
+- **Miscellaneous**: Misspellings and other categories
+
+**Buyer Personas:**
+Generates 2-4 tiers of potential buyers, from most relevant (Tier 1) to broader prospects (Tier 4).
+
+##### 2. Research Supervisor Path (`research_supervisor`)
+
+Uses the Deep Research supervisor-researcher architecture to:
+- Delegate research tasks to specialized sub-agents
+- Search for companies matching buyer personas
+- Extract company information from web sources
+- Structure findings into Lead objects
+
+**Tools Available:**
+- `jina_search`: Web search with Jina API
+- `jina_read_url`: Read full webpage content
+- `scraping_company_info`: Fetch company data (Tracxn-based, toggleable)
+- `think_tool`: Strategic planning and reflection
+- MCP tools (if configured)
+
+##### 3. DotDB Path (`dotdb_generate_leads`)
+
+Direct keyword matching workflow:
+
+**Steps:**
+1. **Keyword Generation**: LLM extracts search keywords from domain
+   - Root phrase analysis (e.g., "california attorney")
+   - Component extraction (geo, industry, brand terms)
+   - Variant generation (hyphenated, concatenated, singular/plural)
+   - 40-80 keywords generated in tiered groups
+
+2. **DotDB Query**: Bulk search for domains matching keywords
+   - Queries DotDB API for active domains
+   - Exact SLD (Second Level Domain) filtering
+   - Returns list of candidate domains
+
+3. **Jina Validation**: Parallel verification of domains
+   - Concurrent API calls (limit: 10)
+   - Fetches site info (title, description, content)
+   - Filters out parked/inactive domains
+
+4. **Lead Structuring**: LLM converts validated sites to leads
+   - Analyzes site content
+   - Generates detailed summary
+   - Assigns tier based on classification
+   - Extracts metadata
+
+##### 4. Lead Deduplication (`dedupe_leads`, `get_leads`)
+
+Intelligent merging and deduplication:
+
+**Normalization:**
+- Uses `tldextract` for robust domain parsing
+- Handles complex TLDs (`.co.uk`, `.com.au`)
+- Strips protocols, subdomains, paths
+- Example: `https://www.example.com/path` → `example.com`
+
+**Merge Strategy:**
+- Dictionary-based O(1) lookup
+- Keeps lead with more information (longer summary or metadata)
+- Preserves all unique domains
+
+#### Configuration
+
+##### Environment Variables
+
+```bash
+# API Keys
+JINA_API_KEY=your_jina_api_key
+OPENROUTER_API_KEY=your_openrouter_key  # or OPENAI_API_KEY
+
+# Lead Gen Specific
+DOTDB_URL=https://your-dotdb-instance.com
+SCRAPER_BASE_URL=http://your-scraper:3000/api/
+
+# Model Configuration (shared with deep research)
+RESEARCH_MODEL=openai:gpt-4.1
+RESEARCH_MODEL_MAX_TOKENS=8000
+SUMMARIZATION_MODEL=openai:gpt-4.1-mini
+SUMMARIZATION_MODEL_MAX_TOKENS=6000
+
+# Tool Toggles
+ENABLE_JINA_READER=true
+ENABLE_SCRAPING_TOOL=false  # Set to false if Tracxn is unreliable
+
+# Research Limits
+MAX_RESEARCHER_ITERATIONS=5
+MAX_CONCURRENT_RESEARCH_UNITS=3
+```
+
+##### Configuration Files
+
+- **`lead_gen/configuration.py`**: Lead Gen-specific config (DotDB URL, scraper URL)
+- **`open_deep_research/configuration.py`**: Shared research config (models, limits, tool toggles)
+
+#### Usage
+
+##### Via LangGraph Studio
+
+1. Start the server:
+```bash
+uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+```
+
+2. Open LangGraph Studio: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+
+3. Select "Lead Gen" assistant from "Manage Assistants"
+
+4. Input format:
+```json
+{
+  "domain_name": "californiaattorney.com"
+}
+```
+
+##### Programmatic Usage
+
+```python
+from lead_gen.agent import leadgen_researcher
+
+# Simple invocation
+result = await leadgen_researcher.ainvoke({
+    "domain_name": "californiaattorney.com"
+})
+
+# Access leads
+leads = result["leads"]
+for lead in leads:
+    print(f"Company: {lead.website}")
+    print(f"Summary: {lead.detailed_summary}")
+    print(f"Tier: {lead.tier}")
+    print(f"Rationale: {lead.rationale}")
+    print("---")
+```
+
+#### Lead Output Schema
+
+Each lead contains:
+
+```python
+{
+  "website": "https://acme-law.com",  # Canonical URL
+  "detailed_summary": "2-4 sentences describing the company's offerings, target customers, and differentiators",
+  "rationale": "1-2 sentences explaining why this company would be interested in the domain",
+  "tier": "Tier 1",  # or "Tier 2", "Tier 3", "Tier 4"
+  "meta_data": {  # Optional
+    "domain": "acme-law.com",
+    "title": "Acme Law Firm",
+    "signals": {"active": true},
+    "geo": "California, USA",
+    "contact": "info@acme-law.com"
+  }
+}
+```
+
+#### Performance Optimization
+
+**Parallel Execution:**
+- Research supervisor and DotDB paths run simultaneously
+- DotDB: Jina validation uses 10 concurrent requests
+- Total workflow time: typically 2-5 minutes depending on complexity
+
+**API Call Reduction:**
+- Disable `ENABLE_JINA_READER=false` to skip full page reads
+- Disable `ENABLE_SCRAPING_TOOL=false` to skip Tracxn API
+- Adjust `MAX_RESEARCHER_ITERATIONS` to limit research depth
+
+**Cost Management:**
+- Research supervisor: ~$0.10-0.50 per domain (depends on model and iterations)
+- DotDB path: ~$0.05-0.20 per domain (depends on keyword count and LLM calls)
+- Total: ~$0.15-0.70 per domain name
+
+#### Troubleshooting
+
+##### Few or No Leads Returned
+
+**Possible Causes:**
+1. Classification too narrow or incorrect
+2. DotDB API returning no domains
+3. Jina validation failing (all domains marked as parked)
+4. Research supervisor not finding relevant companies
+
+**Solutions:**
+- Review classification output in workflow traces
+- Check DotDB keyword generation (should have 40-80 keywords)
+- Verify Jina API key is valid
+- Increase `MAX_RESEARCHER_ITERATIONS` to allow more research
+- Check logs for API errors
+
+##### Too Many API Calls / Slow Performance
+
+**Solutions:**
+- Set `ENABLE_JINA_READER=false` (reduces calls by ~50%)
+- Set `ENABLE_SCRAPING_TOOL=false`
+- Reduce `MAX_RESEARCHER_ITERATIONS` to 3
+- Reduce `MAX_CONCURRENT_RESEARCH_UNITS` to 2
+- Use faster/cheaper models for summarization
+
+##### Duplicate Leads
+
+**Solutions:**
+- Leads should auto-deduplicate via `normalize_website()`
+- Check if domains have different formats (e.g., `www.` vs non-www)
+- Verify deduplication logic in traces
+- Report issues if duplicates persist after `get_leads` node
+
+#### Advanced Configuration
+
+##### Custom Classification Guide
+
+Edit `lead_gen/classify_prompts.py` → `CLASSIFICATION_GUIDE` to add your own domain categories.
+
+##### Custom Buyer Persona Prompt
+
+Edit `lead_gen/classify_prompts.py` → `classification_and_buyers_prompt` to customize how buyer personas are generated.
+
+##### Custom DotDB Keywords
+
+Edit `lead_gen/classify_prompts.py` → `DOTDB_KEYWORD_GEN_PROMPT` to adjust keyword generation strategy.
+
+##### Standalone DotDB Workflow
+
+Run only the DotDB workflow without research supervisor:
+
+```python
+from lead_gen.dotdb_subgraph import dotdb_standalone
+
+result = await dotdb_standalone.ainvoke({
+    "domain_name": "californiaattorney.com"
+})
+
+leads = result["leads"]
+```
+
+#### See Also
+
+- **Full Technical Documentation**: [`docs/GUIDEBOOK.md`](docs/GUIDEBOOK.md)
+- **Tool Toggle Configuration**: [`TOOL_TOGGLES.md`](TOOL_TOGGLES.md)
+- **Deep Research Architecture**: Uses the same supervisor-researcher pattern
+
+---
+
 ### Legacy Implementations 🏛️
 
 The `src/legacy/` folder contains two earlier implementations that provide alternative approaches to automated research. They are less performant than the current implementation, but provide alternative ideas understanding the different approaches to deep research.
@@ -142,7 +442,7 @@ The `src/legacy/` folder contains two earlier implementations that provide alter
 - **Interactive Control**: Allows feedback and approval of report plans
 - **Quality Focused**: Emphasizes accuracy through iterative refinement
 
-#### 2. Multi-Agent Implementation (`legacy/multi_agent.py`)  
+#### 2. Multi-Agent Implementation (`legacy/multi_agent.py`)
 - **Supervisor-Researcher Architecture**: Coordinated multi-agent system
 - **Parallel Processing**: Multiple researchers work simultaneously
 - **Speed Optimized**: Faster report generation through concurrency
