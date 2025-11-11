@@ -205,6 +205,16 @@ Only these fully comprehensive cleaned findings are going to be returned to the 
 4. You should include a "Sources" section at the end of the report that lists all of the sources the researcher found with corresponding citations, cited against statements in the report.
 5. Make sure to include ALL of the sources that the researcher gathered in the report, and how they were used to answer the question!
 6. It's really important not to lose any sources. A later LLM will be used to merge this report with others, so having all of the sources is critical.
+7. **CRITICAL FOR LEAD GENERATION**: Preserve ALL lead-relevant information including:
+   - Company names and their exact website URLs
+   - Business descriptions, products, and services offered
+   - Industry/sector classifications
+   - Contact information (emails, phone numbers, addresses)
+   - Key personnel names and titles
+   - Location/geographic information
+   - Company size, funding, or other business indicators
+   - Any signals indicating they might be interested in acquiring a domain
+   This information will be used downstream for lead extraction, so accuracy and completeness are essential.
 </Guidelines>
 
 <Output Format>

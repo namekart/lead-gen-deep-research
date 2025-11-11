@@ -1,6 +1,6 @@
 # src/lead_gen/agent.py
 
-from typing import Annotated, List, Optional, Dict, Any
+from typing import Annotated, List, Optional, Dict, Any, Union
 from urllib.parse import urlparse
 
 import tldextract
@@ -23,7 +23,7 @@ from open_deep_research.utils import (
 )
 from open_deep_research.state import override_reducer
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from lead_gen.classify_prompts import classification_and_buyers_prompt, CLASSIFICATION_GUIDE, leadgen_supervisor_prompt
 from lead_gen.dotdb_subgraph import dotdb_subgraph
@@ -53,17 +53,32 @@ class LeadGenState(TypedDict, total=False):
     leads: Annotated[list["Lead"], override_reducer]
 
 
+class LeadMetaData(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    domain: Optional[str] = None
+    title: Optional[str] = None
+    signals: Optional[str] = None  # Changed from Dict to str to avoid Azure schema issues
+    geo: Optional[str] = None
+    contact: Optional[str] = None  # Changed from Union to just str to avoid Azure schema issues
+
 class Lead(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     website: str = Field(..., description="Canonical website or domain of the lead")
     detailed_summary: str = Field(..., description="Detailed, actionable summary of why this is a fit")
     rationale: str = Field(..., description="Short justification tying back to classification/buyer tiers")
     tier: Optional[str] = Field(None, description="Buyer or classification tier for this lead")
-    meta_data: Optional[Dict[str, Any]] = Field(
+    meta_data: Optional[LeadMetaData] = Field(  # <-- changed from Dict[str, Any]
         default=None, description="Optional metadata such as contact hints, geo, size"
+    )
+    email_template: Optional[str] = Field(
+        default=None,
+        description="Personalized email template with variables: {{first_name}}, {{last_name}}, {{phone_number}}, {{company_name}}, {{website}}, {{location}}, {{linkedin_profile}}, {{company_url}}"
     )
 
 
 class LeadList(BaseModel):
+    model_config = ConfigDict(extra='forbid')  # ensure additionalProperties: false at root
     leads: List[Lead] = Field(..., description="List of extracted leads from web search results")
 
 
@@ -320,6 +335,7 @@ async def dotdb_generate_leads(state: LeadGenState, config: RunnableConfig) -> D
                 rationale=item.get("rationale", ""),
                 tier=item.get("tier"),
                 meta_data=item.get("meta_data"),
+                email_template=item.get("email_template"),
             )
         )
     return {"leads": parsed}

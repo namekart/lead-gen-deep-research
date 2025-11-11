@@ -7,6 +7,7 @@ import logging
 from pydantic import BaseModel, Field
 
 from langchain.chat_models import init_chat_model
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -308,7 +309,8 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
                     "researcher_messages": [
                         HumanMessage(content=tool_call["args"]["research_topic"])
                     ],
-                    "research_topic": tool_call["args"]["research_topic"]
+                    "research_topic": tool_call["args"]["research_topic"],
+                    "classification_output": state.get("classification_output", "")
                 }, config)
                 for tool_call in allowed_conduct_research_calls
             ]
@@ -536,6 +538,60 @@ async def researcher_tools(state: ResearcherState, config: RunnableConfig) -> Co
         update={"researcher_messages": tool_outputs}
     )
 
+async def _summarize_research_chunk(chunk: str, cfg: Configuration, config: RunnableConfig) -> str:
+    """Summarize a research chunk preserving lead-relevant information.
+
+    Focus on extracting and preserving:
+    - Company names and their websites
+    - Business descriptions and offerings
+    - Industry/sector information
+    - Contact information (if any)
+    - Relevance to domain being sold
+
+    Args:
+        chunk: Research content chunk to summarize
+        cfg: Configuration object with model settings
+        config: Runtime configuration
+
+    Returns:
+        Condensed summary preserving all lead-relevant information
+    """
+    model = (
+        configurable_model
+        .with_config({
+            "model": normalize_model_name(cfg.summarization_model),
+            "model_provider": get_model_provider_for_model(cfg.summarization_model),
+            "base_url": get_base_url_for_model(cfg.summarization_model),
+            "max_tokens": cfg.summarization_model_max_tokens,
+            "api_key": get_api_key_for_model(cfg.summarization_model, config),
+            "tags": ["langsmith:nostream"],
+        })
+    )
+
+    prompt = f"""Summarize the following research content, preserving ALL information relevant to potential leads.
+
+Focus on extracting and preserving:
+- Company names and their websites/URLs
+- Business descriptions, products, and services offered
+- Industry/sector classification
+- Contact information, locations, or key personnel (if mentioned)
+- Any indicators of why they might be interested in acquiring a domain
+- Specific business details that show they are an operating company
+
+Research content:
+{chunk}
+
+Provide a concise summary that preserves all company and lead information without losing any critical details."""
+
+    try:
+        response = await model.ainvoke([HumanMessage(content=prompt)])
+        return response.content if hasattr(response, 'content') else str(response)
+    except Exception as e:
+        logging.warning(f"Error summarizing research chunk: {e}")
+        # Return original chunk if summarization fails
+        return chunk
+
+
 async def extract_leads_from_research(compressed_research: str, raw_notes: List[str], config: RunnableConfig) -> List[Dict]:
     """Extract leads from compressed research and raw notes.
 
@@ -550,16 +606,39 @@ async def extract_leads_from_research(compressed_research: str, raw_notes: List[
     try:
         cfg = Configuration.from_runnable_config(config)
 
-        # Define local schema to avoid circular imports
-        class Lead(BaseModel):
-            website: str
-            detailed_summary: str
-            rationale: str
-            tier: Optional[str] = None
-            meta_data: Optional[Dict[str, str]] = None
+        # Import centralized Lead schema (late import to avoid circular dependencies)
+        from lead_gen.agent import Lead, LeadList
 
-        class LeadList(BaseModel):
-            leads: List[Lead]
+        # Step 1: Combine research content
+        combined_research = f"RESEARCH SUMMARY:\n{compressed_research}\n\nRAW NOTES:\n{''.join(raw_notes)}"
+
+        # Step 2: Check content size and apply intelligent summarization if needed
+        if len(combined_research) > 10000:  # ~2,500 tokens threshold
+            logging.info(f"[extract_leads] Content size {len(combined_research)} chars exceeds threshold. Applying intelligent summarization...")
+
+            # Use RecursiveCharacterTextSplitter to chunk content intelligently
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=3000,
+                chunk_overlap=300,
+                separators=["\n\n", "\n", ". ", " ", ""]
+            )
+            chunks = splitter.split_text(combined_research)
+            logging.info(f"[extract_leads] Split content into {len(chunks)} chunks")
+
+            # Summarize each chunk preserving lead-relevant information
+            summarized_chunks = []
+            for i, chunk in enumerate(chunks):
+                logging.debug(f"[extract_leads] Summarizing chunk {i+1}/{len(chunks)}")
+                summary = await _summarize_research_chunk(chunk, cfg, config)
+                summarized_chunks.append(summary)
+
+            # Use summarized content for lead extraction
+            final_research_content = "\n\n".join(summarized_chunks)
+            logging.info(f"[extract_leads] Summarized content size: {len(final_research_content)} chars")
+        else:
+            # Use original content if below threshold
+            final_research_content = combined_research
+            logging.info(f"[extract_leads] Content size {len(combined_research)} chars is within threshold. Using original content.")
 
         # Prepare the extraction model
         extraction_model = (
@@ -576,18 +655,31 @@ async def extract_leads_from_research(compressed_research: str, raw_notes: List[
             })
         )
 
-        # Prepare the prompt for lead extraction
+        # Step 3: Prepare the prompt for lead extraction using processed content
         prompt = (
             "Extract potential leads from the following research findings. "
             "Focus on companies, organizations, or individuals who might be interested in the domain.\n\n"
-            f"RESEARCH SUMMARY:\n{compressed_research}\n\n"
-            f"RAW NOTES:\n{''.join(raw_notes)}\n\n"
+            f"{final_research_content}\n\n"
             "For each lead, provide:\n"
             "- website: The company's website URL\n"
             "- detailed_summary: Why they'd be interested in the domain\n"
             "- rationale: Your reasoning for this lead\n"
             "- tier: Optional classification tier (e.g., 'Tier 1', 'Strategic')\n"
-            "- meta_data: Any additional relevant information\n\n"
+            "- meta_data: Any additional relevant information\n"
+            "- email_template: Generate a SHORT, CONCISE, RELEVANT email (100-150 words max) personalized to this lead's business based on the research findings. "
+            "Use template variables: {{first_name}}, {{last_name}}, {{phone_number}}, {{company_name}}, {{website}}, {{location}}, {{linkedin_profile}}, {{company_url}}. "
+            "These variables should work gracefully even if not populated at runtime. "
+            "Customize the opening and benefits based on the lead's specific business/industry. "
+            "Always include this footer signature:\n\n"
+            "Best regards,\\n"
+            "John\\n"
+            "Name.ai LLC | A Namekart Brand\\n"
+            "World's #1 AI Domains Brokerage\\n"
+            "30 N Gould St Ste R, Sheridan, WY, 82801\\n\\n"
+            "Book a Meeting: https://cal.com/name-ai\\n"
+            "Top Assets: Audit.ai | Bank.ai | Market.ai | Match.ai | Soul.ai\\n"
+            "Transaction Platforms: GoDaddy (DAN) | NameLot (NameSilo)\\n\\n"
+            "PS: We also offer direct invoicing via Stripe if you wish to pay via Amex, though that requires ID verification.\n\n"
             "Only include real, verifiable leads with valid websites."
         )
 
@@ -654,18 +746,11 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
                 for message in filter_messages(researcher_messages, include_types=["tool", "ai"])
             ])
 
-            # Extract leads from the compressed research
-            leads = await extract_leads_from_research(
-                str(response.content),
-                [raw_notes_content],
-                config
-            )
-
-            # Return successful compression result with extracted leads
+            # Return successful compression result
+            # Lead extraction now happens in the dedicated extract_leads_node
             return {
                 "compressed_research": str(response.content),
-                "raw_notes": [raw_notes_content],
-                "leads": leads
+                "raw_notes": [raw_notes_content]
             }
 
         except Exception as e:
@@ -687,9 +772,101 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
 
     return {
         "compressed_research": "Error synthesizing research report: Maximum retries exceeded",
-        "raw_notes": [raw_notes_content],
-        "leads": []
+        "raw_notes": [raw_notes_content]
     }
+
+
+async def extract_leads_node(state: ResearcherState, config: RunnableConfig):
+    """Extract leads from compressed research aligned with classification output.
+
+    This node runs after compression to extract structured leads that match
+    the classification tiers and buyer personas. It directly calls the LLM
+    with the compressed research (no chunking/summarization needed since
+    the research is already condensed) and classification context.
+
+    Args:
+        state: Researcher state with compressed research and classification
+        config: Runtime configuration with model settings
+
+    Returns:
+        Dictionary with extracted leads to append to global state
+    """
+    try:
+        cfg = Configuration.from_runnable_config(config)
+
+        # Import centralized Lead schema (late import to avoid circular dependencies)
+        from lead_gen.agent import Lead, LeadList
+
+        # Get compressed research and classification from state
+        compressed = state.get("compressed_research", "")
+        classification = state.get("classification_output", "")
+
+        if not compressed:
+            logging.warning("[extract_leads_node] No compressed research found, skipping lead extraction")
+            return {"leads": []}
+
+        logging.info(f"[extract_leads_node] Starting lead extraction (compressed research: {len(compressed)} chars, classification: {len(classification)} chars)")
+
+        # Prepare extraction model with structured output
+        extraction_model = (
+            configurable_model
+            .with_structured_output(LeadList)
+            .with_retry(stop_after_attempt=cfg.max_structured_output_retries)
+            .with_config({
+                "model": normalize_model_name(cfg.research_model),
+                "model_provider": get_model_provider_for_model(cfg.research_model),
+                "base_url": get_base_url_for_model(cfg.research_model),
+                "max_tokens": cfg.research_model_max_tokens,
+                "api_key": get_api_key_for_model(cfg.research_model, config),
+                "tags": ["langsmith:nostream"],
+            })
+        )
+
+        # Build prompt with classification context and compressed research
+        classification_context = f"CLASSIFICATION OUTPUT (Buyer Personas & Tiers):\n{classification}\n\n" if classification else ""
+
+        prompt = (
+            "Extract potential leads from the research findings below, ensuring they align with the classification output.\n\n"
+            f"{classification_context}"
+            f"COMPRESSED RESEARCH:\n{compressed}\n\n"
+            "For each lead, provide:\n"
+            "- website: The company's website URL\n"
+            "- detailed_summary: Why they'd be interested in the domain (align with classification tiers)\n"
+            "- rationale: Your reasoning for this lead based on the classification\n"
+            "- tier: Classification tier (e.g., 'Tier 1', 'Tier 2', 'Tier 3')\n"
+            "- meta_data: Any additional relevant information (contact, location, etc.)\n"
+            "- email_template: Generate a SHORT, CONCISE, RELEVANT email (100-150 words max) personalized to this lead's business. "
+            "Use template variables: {{first_name}}, {{last_name}}, {{phone_number}}, {{company_name}}, {{website}}, {{location}}, {{linkedin_profile}}, {{company_url}}. "
+            "These variables should work gracefully even if not populated at runtime. "
+            "Customize the opening and benefits based on the lead's specific business/industry. "
+            "Always include this footer signature:\n\n"
+            "Best regards,\\n"
+            "John\\n"
+            "Name.ai LLC | A Namekart Brand\\n"
+            "World's #1 AI Domains Brokerage\\n"
+            "30 N Gould St Ste R, Sheridan, WY, 82801\\n\\n"
+            "Book a Meeting: https://cal.com/name-ai\\n"
+            "Top Assets: Audit.ai | Bank.ai | Market.ai | Match.ai | Soul.ai\\n"
+            "Transaction Platforms: GoDaddy (DAN) | NameLot (NameSilo)\\n\\n"
+            "PS: We also offer direct invoicing via Stripe if you wish to pay via Amex, though that requires ID verification.\n\n"
+            "Only extract leads that match the classification tiers and are verifiable from the research."
+        )
+
+        # Extract leads using structured output
+        result = await extraction_model.ainvoke([HumanMessage(content=prompt)])
+
+        if result and hasattr(result, "leads"):
+            leads = [lead.dict() for lead in result.leads]
+            logging.info(f"[extract_leads_node] Extracted {len(leads)} leads from research unit")
+            return {"leads": leads}
+
+        logging.info("[extract_leads_node] No leads extracted from this research unit")
+        return {"leads": []}
+
+    except Exception as e:
+        logging.error(f"[extract_leads_node] Error extracting leads: {e}")
+        return {"leads": []}
+
 
 # Researcher Subgraph Construction
 # Creates individual researcher workflow for conducting focused research on specific topics
@@ -703,10 +880,12 @@ researcher_builder = StateGraph(
 researcher_builder.add_node("researcher", researcher)                 # Main researcher logic
 researcher_builder.add_node("researcher_tools", researcher_tools)     # Tool execution handler
 researcher_builder.add_node("compress_research", compress_research)   # Research compression
+researcher_builder.add_node("extract_leads_node", extract_leads_node) # Lead extraction
 
 # Define researcher workflow edges
-researcher_builder.add_edge(START, "researcher")           # Entry point to researcher
-researcher_builder.add_edge("compress_research", END)      # Exit point after compression
+researcher_builder.add_edge(START, "researcher")                      # Entry point to researcher
+researcher_builder.add_edge("compress_research", "extract_leads_node") # Compression to lead extraction
+researcher_builder.add_edge("extract_leads_node", END)                # Exit point after lead extraction
 
 # Compile researcher subgraph for parallel execution by supervisor
 researcher_subgraph = researcher_builder.compile()

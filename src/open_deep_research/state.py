@@ -80,6 +80,7 @@ class SupervisorState(TypedDict):
     research_iterations: int = 0
     raw_notes: Annotated[list[str], override_reducer] = []
     leads: Annotated[list[dict], override_reducer] = []
+    classification_output: str = ""
 
 class ResearcherState(TypedDict):
     """State for individual researchers conducting research."""
@@ -89,10 +90,11 @@ class ResearcherState(TypedDict):
     research_topic: str
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
+    classification_output: str = ""
 
 class ResearcherOutputState(BaseModel):
     """Output state from individual researchers."""
 
     compressed_research: str
     raw_notes: Annotated[list[str], override_reducer] = []
-    leads: list[dict] = []
+    leads: list[dict] = []  # Extracted by extract_leads_node, appended to global state
